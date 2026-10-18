@@ -141,7 +141,10 @@ var SGASync = (function () {
               revoked: e.revoked === true, occurred_at: _iso(e.time)
             };
           });
-          if (led.length) jobs.push(client.from('points_ledger').upsert(led));
+          /* onConflict 必须显式指向幂等键 (family_id,child_id,client_id)：
+             默认冲突目标是主键 id（自动 uuid），游标丢失后全量重推会违反唯一约束 */
+          if (led.length) jobs.push(client.from('points_ledger')
+            .upsert(led, { onConflict: 'family_id,child_id,client_id' }));
           /* 打卡（按 day+task 主键 upsert） */
           var ckRows = [];
           Object.keys(cs.checkins || {}).forEach(function (day) {
@@ -170,7 +173,8 @@ var SGASync = (function () {
               occurred_at: _iso(r.time)
             };
           });
-          if (reds.length) jobs.push(client.from('redemptions').upsert(reds));
+          if (reds.length) jobs.push(client.from('redemptions')
+            .upsert(reds, { onConflict: 'family_id,child_id,client_id' }));
           /* 每孩子任务配置（整体 LWW） */
           if (cs.taskConfig) {
             jobs.push(client.from('child_task_config')
