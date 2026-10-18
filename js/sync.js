@@ -431,6 +431,9 @@ var SGASync = (function () {
           _familyId = fid;
           return pullAndMerge();
         }).then(function () {
+          /* 登录后立即推送一次：首登把本地数据迁移上云；后续登录为空增量，幂等 */
+          return pushNow();
+        }).then(function () {
           _initializing = false;
           _notify();
         }).catch(function (err) {
