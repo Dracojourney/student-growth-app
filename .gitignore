@@ -21,3 +21,7 @@ node_modules/
 # ---- 系统与编辑器杂项 ----
 Thumbs.db
 .DS_Store
+.agents/
+
+# Local Netlify folder
+.netlify
