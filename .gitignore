@@ -22,6 +22,7 @@ node_modules/
 Thumbs.db
 .DS_Store
 .agents/
+supabase/config.local.json
 
 # Local Netlify folder
 .netlify
