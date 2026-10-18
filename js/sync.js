@@ -3,7 +3,8 @@
  * - localStorage 始终是工作副本：未登录时应用完整运行于本地模式；
  *   登录后云端作为持久备份与多设备同步通道。
  * - 幂等：流水/兑换按 client_id 唯一约束 upsert；打卡按主键
- *   (family_id, child_id, day, task_id) upsert；配置整体 LWW。
+ *   (family_id, child_id, day, task_id) upsert；配置按内容哈希门控
+ *   推送 + 云端 updated_at 条件采纳（本地已改则保留并推送覆盖）。
  * - 首登迁移：云端家庭为空时全量上传本地数据，并写
  *   family_settings.migration_state={status:'done'} 标记。
  * - 删除传播：推送时对比上次已同步的孩子集合，缺失者从云端删除
@@ -89,7 +90,26 @@ var SGASync = (function () {
     return new Date(n).toISOString();
   }
 
-  /* ---------- 推送（增量：流水/打卡/兑换按时间游标，配置全量 LWW）---------- */
+  /* ---------- 配置变更检测（键序无关稳定序列化 + djb2 哈希）----------
+     同步游标为每个配置记录 {h: 内容哈希, cloud: 云端 updated_at}：
+     - 推送：哈希与上次一致 → 跳过（避免无变更推送刷新云端 updated_at）
+     - 拉取：云端 updated_at 前进且本地哈希与上次同步一致（本地未改）
+       → 采纳云端；本地已改 → 保留本地，随后推送覆盖（推送侧 LWW 收敛） */
+  function _stableStr(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    if (Array.isArray(v)) return '[' + v.map(_stableStr).join(',') + ']';
+    var keys = Object.keys(v).sort();
+    return '{' + keys.map(function (k) { return JSON.stringify(k) + ':' + _stableStr(v[k]); }).join(',') + '}';
+  }
+  function _hashCfg(obj) {
+    var s = _stableStr(obj) || '';
+    var h = 5381;
+    for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+    return h.toString(16);
+  }
+  function _cfgMeta(syncSt) { if (!syncSt.cfg) syncSt.cfg = {}; return syncSt.cfg; }
+
+  /* ---------- 推送（增量：流水/打卡/兑换按时间游标，配置按内容哈希门控）---------- */
   function pushNow() {
     if (!_user || !_familyId || _syncing) return Promise.resolve(false);
     var st = (typeof getAppState === 'function') ? getAppState() : null;
@@ -127,6 +147,7 @@ var SGASync = (function () {
       .then(function (r) {
         if (r.error) throw r.error;
         var jobs = [];
+        var cfgMetaUpdates = []; /* 推送成功后才落游标，失败下轮重试 */
         st.childrenList.forEach(function (c) {
           var cs = st.children[c.id];
           if (!cs) return;
@@ -175,24 +196,42 @@ var SGASync = (function () {
           });
           if (reds.length) jobs.push(client.from('redemptions')
             .upsert(reds, { onConflict: 'family_id,child_id,client_id' }));
-          /* 每孩子任务配置（整体 LWW） */
+          /* 每孩子任务配置：内容哈希变化才推送（哈希门控 LWW） */
           if (cs.taskConfig) {
-            jobs.push(client.from('child_task_config')
-              .upsert({ family_id: fid, child_id: c.id, data: cs.taskConfig, updated_at: nowIso }));
+            var tKey = 'task:' + c.id;
+            var tH = _hashCfg(cs.taskConfig);
+            var tM = _cfgMeta(syncSt)[tKey];
+            if (!tM || tM.h !== tH) {
+              jobs.push(client.from('child_task_config')
+                .upsert({ family_id: fid, child_id: c.id, data: cs.taskConfig, updated_at: nowIso }));
+              cfgMetaUpdates.push({ key: tKey, h: tH });
+            }
           }
         });
-        /* 家庭共享奖励配置 */
+        /* 家庭共享奖励配置：同样按哈希门控 */
         if (st.rewardConfig) {
-          jobs.push(client.from('family_reward_config')
-            .upsert({ family_id: fid, data: st.rewardConfig, updated_at: nowIso }));
+          var rH = _hashCfg(st.rewardConfig);
+          var rM = _cfgMeta(syncSt).reward;
+          if (!rM || rM.h !== rH) {
+            jobs.push(client.from('family_reward_config')
+              .upsert({ family_id: fid, data: st.rewardConfig, updated_at: nowIso }));
+            cfgMetaUpdates.push({ key: 'reward', h: rH });
+          }
         }
         /* 首次全量上传完成标记（拉取侧据此执行"云端缺失=已删除"规则） */
         jobs.push(client.from('family_settings').upsert({ family_id: fid, migration_state: { status: 'done' } }));
         return Promise.all(jobs.map(function (j) {
           return j.then(function (r) { if (r && r.error) throw r.error; });
-        }));
+        })).then(function () { return cfgMetaUpdates; });
       })
-      .then(function () {
+      .then(function (cfgMetaUpdates) {
+        cfgMetaUpdates.forEach(function (u) { _cfgMeta(syncSt)[u.key] = { h: u.h, cloud: nowIso }; });
+        /* 清理已删除孩子的配置游标 */
+        if (syncSt.cfg) {
+          Object.keys(syncSt.cfg).forEach(function (k) {
+            if (k.indexOf('task:') === 0 && curIds.indexOf(k.slice(5)) === -1) delete syncSt.cfg[k];
+          });
+        }
         syncSt.childIds = curIds;
         syncSt.lastPushAt = Date.now();
         _saveLocal(syncSt);
@@ -233,7 +272,7 @@ var SGASync = (function () {
       client.from('checkins').select('*').eq('family_id', _familyId).eq('child_id', cid),
       client.from('redemptions').select('*').eq('family_id', _familyId).eq('child_id', cid)
         .order('occurred_at', { ascending: false }),
-      client.from('child_task_config').select('data').eq('family_id', _familyId).eq('child_id', cid).maybeSingle()
+      client.from('child_task_config').select('data,updated_at').eq('family_id', _familyId).eq('child_id', cid).maybeSingle()
     ]).then(function (rs) {
       if (rs[0].error) throw rs[0].error;
       if (rs[1].error) throw rs[1].error;
@@ -273,22 +312,27 @@ var SGASync = (function () {
           points: Math.max(0, ck.points || 0), pointsHistory: pointsHistory,
           checkins: checkins, redemptions: redemptions,
           taskConfig: (cfg && cfg.data) ? cfg.data : { overrides: {}, custom: [] }
-        }
+        },
+        cfgUpdatedAt: (cfg && cfg.updated_at) ? cfg.updated_at : null
       };
     });
   }
 
-  /* 已存在孩子：云端流水/打卡/兑换按幂等键并入本地，余额按符号规则重算 */
-  function mergeChildFromCloud(cid, cb) {
+  /* 已存在孩子：云端流水/打卡/兑换按幂等键并入本地，余额按符号规则重算；
+     任务配置按哈希门控规则：云端更新且本地自上次同步后未改 → 采纳云端 */
+  function mergeChildFromCloud(cid, cb, syncSt) {
     return Promise.all([
       client.from('points_ledger').select('*').eq('family_id', _familyId).eq('child_id', cid)
         .order('occurred_at', { ascending: false }),
       client.from('checkins').select('*').eq('family_id', _familyId).eq('child_id', cid),
       client.from('redemptions').select('*').eq('family_id', _familyId).eq('child_id', cid)
+        .order('occurred_at', { ascending: false }),
+      client.from('child_task_config').select('data,updated_at').eq('family_id', _familyId).eq('child_id', cid).maybeSingle()
     ]).then(function (rs) {
       if (rs[0].error) throw rs[0].error;
       if (rs[1].error) throw rs[1].error;
       if (rs[2].error) throw rs[2].error;
+      if (rs[3].error) throw rs[3].error;
       var changed = false;
       var cs = cb;
       /* 流水并集（client_id 幂等） */
@@ -332,6 +376,18 @@ var SGASync = (function () {
         changed = true;
       });
       if (changed) recomputePoints(cs);
+      /* 任务配置采纳：云端 updated_at 前进且本地自上次同步后未改（哈希一致） */
+      var cfgRow = rs[3].data;
+      if (cfgRow && cfgRow.data && syncSt) {
+        var key = 'task:' + cid;
+        var meta = _cfgMeta(syncSt)[key];
+        if (meta && meta.h === _hashCfg(cb.taskConfig || {}) &&
+            (Date.parse(cfgRow.updated_at) || 0) > (Date.parse(meta.cloud) || 0)) {
+          cb.taskConfig = cfgRow.data;
+          _cfgMeta(syncSt)[key] = { h: _hashCfg(cfgRow.data), cloud: cfgRow.updated_at };
+          changed = true;
+        }
+      }
       return changed;
     });
   }
@@ -343,6 +399,7 @@ var SGASync = (function () {
     _syncing = true; _notify();
     var fid = _familyId;
     var changedAny = false;
+    var syncSt = _loadLocal();
 
     return client.from('family_settings').select('migration_state').eq('family_id', fid).maybeSingle()
       .then(function (r0) {
@@ -357,7 +414,7 @@ var SGASync = (function () {
           var jobs = cloudKids.map(function (ck) {
             var cid = ck.child_id;
             if (st.children[cid]) {
-              return mergeChildFromCloud(cid, st.children[cid]).then(function (changed) {
+              return mergeChildFromCloud(cid, st.children[cid], syncSt).then(function (changed) {
                 if (changed) changedAny = true;
               });
             }
@@ -365,6 +422,7 @@ var SGASync = (function () {
               if (st.children[cid]) return; /* 合并期间出现，跳过 */
               st.children[cid] = built.cs;
               st.childrenList.push(built.profile);
+              _cfgMeta(syncSt)['task:' + cid] = { h: _hashCfg(built.cs.taskConfig), cloud: built.cfgUpdatedAt };
               changedAny = true;
             });
           });
@@ -379,20 +437,34 @@ var SGASync = (function () {
                 changedAny = true;
               }
             }
-            /* 家庭共享奖励配置：本地没有才取云端 */
-            if (!st.rewardConfig) {
-              return client.from('family_reward_config').select('data').eq('family_id', fid).maybeSingle()
-                .then(function (r2) {
-                  if (r2.error) throw r2.error;
-                  if (r2.data && r2.data.data) { st.rewardConfig = r2.data.data; changedAny = true; }
-                });
-            }
+            /* 家庭共享奖励配置：本地缺失 → 取云端；
+               云端更新且本地自上次同步后未改 → 采纳云端 */
+            return client.from('family_reward_config').select('data,updated_at').eq('family_id', fid).maybeSingle()
+              .then(function (r2) {
+                if (r2.error) throw r2.error;
+                var row = r2.data;
+                if (!row || !row.data) return;
+                if (!st.rewardConfig) {
+                  st.rewardConfig = row.data;
+                  _cfgMeta(syncSt).reward = { h: _hashCfg(row.data), cloud: row.updated_at };
+                  changedAny = true;
+                  return;
+                }
+                var meta = _cfgMeta(syncSt).reward;
+                if (meta && meta.h === _hashCfg(st.rewardConfig) &&
+                    (Date.parse(row.updated_at) || 0) > (Date.parse(meta.cloud) || 0)) {
+                  st.rewardConfig = row.data;
+                  _cfgMeta(syncSt).reward = { h: _hashCfg(row.data), cloud: row.updated_at };
+                  changedAny = true;
+                }
+              });
           });
         });
       })
       .then(function () {
         if (changedAny) {
           if (typeof saveState === 'function') saveState(st);
+          _saveLocal(syncSt);
           _lastSyncAt = Date.now();
           if (typeof render === 'function') { try { render(); } catch (e) {} }
         }
