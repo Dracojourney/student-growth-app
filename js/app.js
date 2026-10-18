@@ -32,7 +32,8 @@ const SVG = {
   clipboard: '<svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></svg>',
   gift: '<svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg>',
   chart: '<svg viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>',
-  logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>'
+  logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
+  cloud: '<svg viewBox="0 0 24 24"><path d="M17.5 18a4.5 4.5 0 0 0 .38-8.98 6 6 0 0 0-11.5-1.4A4.5 4.5 0 0 0 7 18h10.5z"/></svg>'
 };
 
 /* 任务/奖励图标：assets 路径渲染为图片，否则渲染 emoji（替代资源） */
@@ -356,6 +357,10 @@ function renderParent() {
       <button class="menu-item" data-action="pin" type="button">
         <div class="menu-icon" style="background:#E7EBFF;color:#5B6BB8;">${SVG.lock}</div>
         <div class="menu-main"><div class="m-title">密码设置</div><div class="m-desc">修改家长管理密码</div></div>
+        <span class="menu-arrow">›</span></button>
+      <button class="menu-item" data-action="sync" type="button">
+        <div class="menu-icon" style="background:#E4F3F7;color:#2E8FA8;">${SVG.cloud}</div>
+        <div class="menu-main"><div class="m-title">云同步</div><div class="m-desc">${syncMenuDesc()}</div></div>
         <span class="menu-arrow">›</span></button>
       <button class="menu-item" data-action="logout" type="button">
         <div class="menu-icon" style="background:#FDE6E4;color:#C45050;">${SVG.logout}</div>
@@ -768,6 +773,190 @@ function openPinSettingsForm() {
   modalRoot.appendChild(sheet);
 }
 
+/* ---------- 云同步面板（阶段2）----------
+   未登录：邮箱注册/登录，登录后自动绑定家庭并迁移本地数据上云。
+   已登录：显示同步状态，支持手动立即同步与退出登录。
+   未登录时应用完整走本地模式，本面板不阻塞任何本地功能。 */
+function syncMenuDesc() {
+  if (!(window.SGASync && SGASync.available())) return '未启用';
+  const st = SGASync.status();
+  return st.signedIn ? ('已登录 · ' + (st.email || '')) : '登录后多设备同步数据';
+}
+
+function openSyncSheet() {
+  const sheet = document.createElement('div');
+  sheet.className = 'modal-mask';
+  const panel = document.createElement('div');
+  panel.className = 'modal-sheet is-card';
+  panel.setAttribute('role', 'dialog');
+  sheet.appendChild(panel);
+
+  const title = document.createElement('div');
+  title.className = 'sheet-title';
+  title.textContent = '云同步';
+  panel.appendChild(title);
+
+  const form = document.createElement('div');
+  form.className = 'tm-form';
+
+  /* 组件未加载（vendor 脚本缺失或加载失败）：明确提示，不阻塞本地功能 */
+  if (!(window.SGASync && SGASync.available())) {
+    const note = document.createElement('div');
+    note.className = 'tm-form-note';
+    note.textContent = '云同步组件未加载，当前为纯本地模式，打卡与积分功能不受影响。';
+    form.appendChild(note);
+    panel.appendChild(form);
+    const actions = document.createElement('div');
+    actions.className = 'sheet-actions';
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'btn btn-secondary';
+    closeBtn.type = 'button';
+    closeBtn.textContent = '我知道了';
+    closeBtn.addEventListener('click', closeModal);
+    actions.appendChild(closeBtn);
+    panel.appendChild(actions);
+    sheet.addEventListener('click', e => { if (e.target === sheet) closeModal(); });
+    modalRoot.hidden = false;
+    modalRoot.innerHTML = '';
+    modalRoot.classList.add('is-centered');
+    modalRoot.appendChild(sheet);
+    return;
+  }
+
+  const st = SGASync.status();
+
+  if (!st.signedIn) {
+    const emailField = tmCreateField('邮箱', 'email', '', 100);
+    const pwdField = tmCreateField('密码（至少 6 位）', 'password', '', 30);
+    emailField.input.setAttribute('autocomplete', 'email');
+    pwdField.input.setAttribute('autocomplete', 'current-password');
+    form.appendChild(emailField.wrap);
+    form.appendChild(pwdField.wrap);
+    const note = document.createElement('div');
+    note.className = 'tm-form-note';
+    note.textContent = '用于家庭数据云端备份与多设备同步；未登录时应用完整运行在本地模式。';
+    form.appendChild(note);
+    panel.appendChild(form);
+
+    const actions = document.createElement('div');
+    actions.className = 'sheet-actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-secondary';
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = '取消';
+    cancelBtn.addEventListener('click', closeModal);
+    actions.appendChild(cancelBtn);
+
+    const regBtn = document.createElement('button');
+    regBtn.className = 'btn btn-secondary';
+    regBtn.type = 'button';
+    regBtn.textContent = '注册';
+    const loginBtn = document.createElement('button');
+    loginBtn.className = 'btn btn-primary';
+    loginBtn.type = 'button';
+    loginBtn.textContent = '登录';
+
+    loginBtn.addEventListener('click', () => {
+      const email = emailField.input.value.trim();
+      const pwd = pwdField.input.value;
+      if (!email || !pwd) { showToast('请输入邮箱和密码'); return; }
+      loginBtn.disabled = true;
+      loginBtn.textContent = '请稍候…';
+      SGASync.signIn(email, pwd).then(() => {
+        closeModal();
+        showToast('登录成功，正在同步数据…');
+      }).catch(err => {
+        loginBtn.disabled = false;
+        loginBtn.textContent = '登录';
+        showToast('登录失败：' + (err && err.message ? err.message : '未知错误'));
+      });
+    });
+
+    regBtn.addEventListener('click', () => {
+      const email = emailField.input.value.trim();
+      const pwd = pwdField.input.value;
+      if (!email || !pwd) { showToast('请输入邮箱和密码'); return; }
+      if (pwd.length < 6) { showToast('密码至少 6 位'); return; }
+      regBtn.disabled = true;
+      regBtn.textContent = '请稍候…';
+      SGASync.signUp(email, pwd).then(res => {
+        if (res && res.data && res.data.session) {
+          closeModal();
+          showToast('注册成功，正在同步数据…');
+        } else {
+          regBtn.disabled = false;
+          regBtn.textContent = '注册';
+          showToast('注册成功，请先通过邮箱确认邮件后再登录');
+        }
+      }).catch(err => {
+        regBtn.disabled = false;
+        regBtn.textContent = '注册';
+        showToast('注册失败：' + (err && err.message ? err.message : '未知错误'));
+      });
+    });
+
+    actions.appendChild(regBtn);
+    actions.appendChild(loginBtn);
+    panel.appendChild(actions);
+  } else {
+    const info = document.createElement('div');
+    info.className = 'tm-form-note';
+    const lastSync = st.lastSyncAt ? new Date(st.lastSyncAt).toLocaleString('zh-CN') : '本次会话尚未同步';
+    let lines = '登录账号：' + (st.email || '-') + '\n最近同步：' + lastSync;
+    if (st.lastError) lines += '\n上次错误：' + st.lastError;
+    info.style.whiteSpace = 'pre-line';
+    info.textContent = lines;
+    form.appendChild(info);
+    panel.appendChild(form);
+
+    const actions = document.createElement('div');
+    actions.className = 'sheet-actions';
+    const outBtn = document.createElement('button');
+    outBtn.className = 'btn btn-secondary';
+    outBtn.type = 'button';
+    outBtn.textContent = '退出登录';
+    outBtn.addEventListener('click', () => {
+      outBtn.disabled = true;
+      SGASync.signOut().then(() => {
+        closeModal();
+        showToast('已退出登录，数据保留在本机');
+      }).catch(err => {
+        outBtn.disabled = false;
+        showToast('退出失败：' + (err && err.message ? err.message : '未知错误'));
+      });
+    });
+    actions.appendChild(outBtn);
+
+    const syncBtn = document.createElement('button');
+    syncBtn.className = 'btn btn-primary';
+    syncBtn.type = 'button';
+    syncBtn.textContent = '立即同步';
+    syncBtn.addEventListener('click', () => {
+      syncBtn.disabled = true;
+      syncBtn.textContent = '同步中…';
+      /* syncAll 失败时 resolve(false) 并把错误写入 status().lastError，不会 reject */
+      SGASync.syncAll().then(ok => {
+        if (ok) {
+          closeModal();
+          showToast('同步完成');
+        } else {
+          syncBtn.disabled = false;
+          syncBtn.textContent = '立即同步';
+          showToast('同步失败：' + (SGASync.status().lastError || '未知错误'));
+        }
+      });
+    });
+    actions.appendChild(syncBtn);
+    panel.appendChild(actions);
+  }
+
+  sheet.addEventListener('click', e => { if (e.target === sheet) closeModal(); });
+  modalRoot.hidden = false;
+  modalRoot.innerHTML = '';
+  modalRoot.classList.add('is-centered');
+  modalRoot.appendChild(sheet);
+}
+
 function renderParentGate() {
   pageContent.innerHTML = `<div class="parent-gate"><div class="gate-lock">${SVG.lock}</div><div class="gate-title">家长验证</div><div class="gate-sub">请输入 4 位家长密码</div>
     <div class="gate-dots" id="gate-dots">${[0,1,2,3].map(() => '<div class="gate-dot"></div>').join('')}</div>
@@ -795,6 +984,7 @@ function renderParentGate() {
 function handleParentAction(action) {
   if (action === 'logout') { logoutParent(); showToast('已退出家长模式'); render(); return; }
   if (action === 'pin') { openPinSettingsForm(); return; }
+  if (action === 'sync') { openSyncSheet(); return; }
   if (action === 'tasks') {
     const cur = getCurrentChild();
     if (!cur) { showToast('请先添加孩子'); return; }

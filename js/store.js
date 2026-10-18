@@ -88,6 +88,10 @@ function saveState(state) {
 
 let _state = loadState();
 
+/* 云同步层专用：返回当前状态对象的引用（sync.js 读取/合并用）。
+   业务写入仍必须走 store 各函数，保证校验与流水一致性。 */
+function getAppState() { return _state; }
+
 /* ---------- 本地积分校验（不依赖 data.js）----------
    若 data.js 加载失败，isValidTaskPoints 不存在，store.js 不能因此抛 ReferenceError。
    注意：仅此函数有 fallback；CHILDREN 等 data.js 依赖仍会导致系统不可用。 */
