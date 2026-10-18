@@ -74,26 +74,14 @@ var SGASync = (function () {
     return client.auth.signOut();
   }
 
-  /* ---------- 家庭绑定 ---------- */
+  /* ---------- 家庭绑定 ----------
+     使用 0003 迁移的 ensure_my_family() RPC：advisory lock 原子化，
+     避免多标签页/多设备同时首登时重复建家（前端两步查+建有竞态）。 */
   function ensureFamily() {
-    return client.from('family_members').select('family_id').eq('user_id', _user.id).maybeSingle()
-      .then(function (res) {
-        if (res.error) throw res.error;
-        if (res.data && res.data.family_id) return res.data.family_id;
-        /* 首次使用：创建家庭并以 owner 身份加入 */
-        return client.from('families').insert({ owner_id: _user.id, family_name: '我的家庭' })
-          .select('id').single()
-          .then(function (fres) {
-            if (fres.error) throw fres.error;
-            var fid = fres.data.id;
-            return client.from('family_members')
-              .insert({ family_id: fid, user_id: _user.id, role: 'parent' })
-              .then(function (mres) {
-                if (mres.error) throw mres.error;
-                return fid;
-              });
-          });
-      });
+    return client.rpc('ensure_my_family').then(function (res) {
+      if (res.error) throw res.error;
+      return res.data;
+    });
   }
 
   function _iso(t) {
