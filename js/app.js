@@ -783,6 +783,146 @@ function syncMenuDesc() {
   return st.signedIn ? ('已登录 · ' + (st.email || '')) : '登录后多设备同步数据';
 }
 
+/* ---------- 云同步面板 · 家庭区块（阶段3C）----------
+   已登录态扩展：展示家庭邀请码（可复制、创建者可重置）、家庭成员列表，
+   以及"加入其他家庭"入口。加入 = 本机数据被目标家庭云端数据整体替换，
+   表单内明示不可逆后果，确认按钮即二次确认。 */
+function syncCopyText(text, okMsg) {
+  const done = () => showToast(okMsg || '已复制');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => {
+      syncCopyFallback(text); done();
+    });
+  } else {
+    syncCopyFallback(text); done();
+  }
+}
+function syncCopyFallback(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(ta);
+}
+
+function renderSyncFamilyInfo(box, fam) {
+  const codeLbl = document.createElement('div');
+  codeLbl.className = 'tm-field-label';
+  codeLbl.textContent = '家庭邀请码（发给家人，对方登录后输入即可加入）';
+  box.appendChild(codeLbl);
+
+  const codeRow = document.createElement('div');
+  codeRow.className = 'sync-invite-row';
+  const codeTxt = document.createElement('div');
+  codeTxt.className = 'sync-invite-code';
+  codeTxt.textContent = fam.inviteCode || '------';
+  codeRow.appendChild(codeTxt);
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn btn-secondary sync-mini-btn';
+  copyBtn.type = 'button';
+  copyBtn.textContent = '复制';
+  copyBtn.addEventListener('click', () => {
+    if (!fam.inviteCode) return;
+    syncCopyText(fam.inviteCode, '邀请码已复制');
+  });
+  codeRow.appendChild(copyBtn);
+  box.appendChild(codeRow);
+
+  if (fam.isOwner) {
+    const regenBtn = document.createElement('button');
+    regenBtn.className = 'btn btn-secondary sync-mini-btn sync-regen-btn';
+    regenBtn.type = 'button';
+    regenBtn.textContent = '重置邀请码（旧码将失效）';
+    regenBtn.addEventListener('click', () => {
+      regenBtn.disabled = true;
+      SGASync.regenerateInviteCode().then(code => {
+        codeTxt.textContent = code;
+        fam.inviteCode = code;
+        regenBtn.disabled = false;
+        showToast('邀请码已重置，旧码已失效');
+      }).catch(err => {
+        regenBtn.disabled = false;
+        showToast('重置失败：' + (err && err.message ? err.message : '未知错误'));
+      });
+    });
+    box.appendChild(regenBtn);
+  }
+
+  const memLbl = document.createElement('div');
+  memLbl.className = 'tm-field-label';
+  memLbl.style.marginTop = '6px';
+  memLbl.textContent = '家庭成员';
+  box.appendChild(memLbl);
+  const memList = document.createElement('div');
+  memList.className = 'sync-member-list';
+  (fam.members || []).forEach(m => {
+    const row = document.createElement('div');
+    row.className = 'sync-member-row';
+    row.textContent = (m.email || '未知账号') + (m.isMe ? '（我）' : '');
+    memList.appendChild(row);
+  });
+  box.appendChild(memList);
+}
+
+function renderSyncJoinEntry(joinBox) {
+  joinBox.innerHTML = '';
+  const toggle = document.createElement('button');
+  toggle.className = 'btn btn-secondary sync-join-toggle';
+  toggle.type = 'button';
+  toggle.textContent = '加入其他家庭';
+  toggle.addEventListener('click', () => renderSyncJoinForm(joinBox));
+  joinBox.appendChild(toggle);
+}
+
+function renderSyncJoinForm(joinBox) {
+  joinBox.innerHTML = '';
+  const field = tmCreateField('请输入 6 位家庭邀请码', 'text', '', 6);
+  field.input.setAttribute('autocapitalize', 'characters');
+  field.input.setAttribute('autocomplete', 'off');
+  joinBox.appendChild(field.wrap);
+
+  const warn = document.createElement('div');
+  warn.className = 'tm-form-note sync-warn';
+  warn.textContent = '注意：加入后本机当前数据将被该家庭的云端数据整体替换，您当前账号下的家庭数据将被删除，不可恢复。请确认邀请码来自您的家人。';
+  joinBox.appendChild(warn);
+
+  const actions = document.createElement('div');
+  actions.className = 'sheet-actions';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn btn-secondary';
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = '取消';
+  cancelBtn.addEventListener('click', () => renderSyncJoinEntry(joinBox));
+  actions.appendChild(cancelBtn);
+
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn btn-primary';
+  okBtn.type = 'button';
+  okBtn.textContent = '确认加入';
+  okBtn.addEventListener('click', () => {
+    const code = field.input.value.trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(code)) { showToast('请输入 6 位邀请码'); return; }
+    okBtn.disabled = true;
+    okBtn.textContent = '加入中…';
+    SGASync.joinFamily(code).then(() => {
+      showToast('已加入家庭，正在载入家庭数据…');
+      setTimeout(() => {
+        try { closeModal(); } catch (e) {}
+        location.reload();
+      }, 900);
+    }).catch(err => {
+      okBtn.disabled = false;
+      okBtn.textContent = '确认加入';
+      showToast('加入失败：' + (err && err.message ? err.message : '未知错误'));
+    });
+  });
+  actions.appendChild(okBtn);
+  joinBox.appendChild(actions);
+}
+
 function openSyncSheet() {
   const sheet = document.createElement('div');
   sheet.className = 'modal-mask';
@@ -907,7 +1047,30 @@ function openSyncSheet() {
     info.style.whiteSpace = 'pre-line';
     info.textContent = lines;
     form.appendChild(info);
+
+    /* 阶段3C：家庭信息（邀请码/成员列表，异步填充）+ 加入其他家庭入口 */
+    const famBox = document.createElement('div');
+    famBox.className = 'sync-family';
+    const famLoading = document.createElement('div');
+    famLoading.className = 'tm-form-note';
+    famLoading.textContent = '家庭信息加载中…';
+    famBox.appendChild(famLoading);
+    form.appendChild(famBox);
+
+    const joinBox = document.createElement('div');
+    joinBox.className = 'sync-join';
+    form.appendChild(joinBox);
+    renderSyncJoinEntry(joinBox);
+
     panel.appendChild(form);
+
+    SGASync.getFamilyInfo().then(fam => {
+      if (!fam) { famLoading.textContent = '未获取到家庭信息'; return; }
+      famBox.innerHTML = '';
+      renderSyncFamilyInfo(famBox, fam);
+    }).catch(() => {
+      famLoading.textContent = '家庭信息加载失败，请稍后重试';
+    });
 
     const actions = document.createElement('div');
     actions.className = 'sheet-actions';

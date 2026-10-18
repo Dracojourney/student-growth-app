@@ -27,6 +27,8 @@ var SGASync = (function () {
   } catch (e) { client = null; }
 
   var SYNC_KEY = 'sga_cloud_sync_state'; /* 本设备同步游标（非应用业务数据） */
+  /* 应用业务数据键：与 store.js 的 STORAGE_KEY 同源，只读引用，绝不修改其定义 */
+  var BIZ_KEY = (typeof STORAGE_KEY !== 'undefined' && STORAGE_KEY) ? STORAGE_KEY : 'student_growth_app_v1';
   var VALID_LEDGER_TYPES = { earn: 1, bonus: 1, initial: 1, spend: 1, revoke: 1 };
   var POSITIVE_LEDGER_TYPES = { earn: 1, bonus: 1, initial: 1 };
 
@@ -85,6 +87,61 @@ var SGASync = (function () {
     });
   }
 
+  /* ---------- 家庭成员邀请（阶段 3C）----------
+     加入家庭铁律：目标家庭云端数据整体替换本机数据，绝不反向推送本机数据。
+     - joinFamily：RPC 原子切换成员关系（调用者原自建孤儿家庭级联删除），
+       然后清除本机业务数据与同步游标，写入 adoptCloudOnce 标记；
+       由调用方刷新页面，重启后 ensureFamily 返回新家庭并执行首拉。
+     - adoptCloudOnce 标记存在期间：pushNow 一律拒绝（防止本地种子数据
+       回写云端覆盖家庭真实数据）；pullAndMerge 以云端为准——已存在孩子
+       的资料/任务配置无条件采纳云端，拉取成功后清除标记恢复正常同步。 */
+
+  function getFamilyInfo() {
+    if (!_user || !_familyId) return Promise.resolve(null);
+    return Promise.all([
+      client.from('families').select('id,owner_id,invite_code').eq('id', _familyId).maybeSingle(),
+      client.from('family_members').select('user_id,email,joined_at').eq('family_id', _familyId)
+        .order('joined_at', { ascending: true })
+    ]).then(function (rs) {
+      if (rs[0].error) throw rs[0].error;
+      if (rs[1].error) throw rs[1].error;
+      var fam = rs[0].data;
+      if (!fam) return null;
+      return {
+        familyId: fam.id,
+        inviteCode: fam.invite_code || '',
+        isOwner: fam.owner_id === _user.id,
+        members: (rs[1].data || []).map(function (m) {
+          return { email: m.email || '', isMe: m.user_id === _user.id };
+        })
+      };
+    });
+  }
+
+  function regenerateInviteCode() {
+    if (!_user) return Promise.reject(new Error('请先登录'));
+    return client.rpc('regenerate_my_invite_code').then(function (res) {
+      if (res.error) throw res.error;
+      return res.data;
+    });
+  }
+
+  function joinFamily(code) {
+    if (!_user) return Promise.reject(new Error('请先登录'));
+    var c = String(code || '').trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(c)) return Promise.reject(new Error('请输入 6 位邀请码'));
+    return client.rpc('join_family_by_code', { p_code: c }).then(function (res) {
+      if (res.error) throw res.error;
+      var fid = res.data;
+      if (!fid) throw new Error('加入失败：服务器未返回家庭标识');
+      _familyId = fid;
+      /* 整体替换：本机业务数据与游标作废；写入 adopt 标记供重启后首拉使用 */
+      try { localStorage.removeItem(BIZ_KEY); } catch (e) {}
+      _saveLocal({ adoptCloudOnce: fid });
+      return fid;
+    });
+  }
+
   function _iso(t) {
     var n = (typeof t === 'number') ? t : (Date.parse(t) || Date.now());
     return new Date(n).toISOString();
@@ -112,6 +169,9 @@ var SGASync = (function () {
   /* ---------- 推送（增量：流水/打卡/兑换按时间游标，配置按内容哈希门控）---------- */
   function pushNow() {
     if (!_user || !_familyId || _syncing) return Promise.resolve(false);
+    /* 加入家庭后的首拉完成前禁止一切推送：本机仍是种子/旧数据，
+       回写会覆盖家庭云端真实数据（adoptCloudOnce 游标由 pullAndMerge 清除） */
+    if (_loadLocal().adoptCloudOnce) return Promise.resolve(false);
     var st = (typeof getAppState === 'function') ? getAppState() : null;
     if (!st || !Array.isArray(st.childrenList)) return Promise.resolve(false);
     _syncing = true; _lastError = ''; _notify();
@@ -400,6 +460,9 @@ var SGASync = (function () {
     var fid = _familyId;
     var changedAny = false;
     var syncSt = _loadLocal();
+    /* 加入家庭后的首次拉取：一切以云端为准（资料/配置无条件采纳），
+       拉取成功后清除该标记恢复正常同步 */
+    var adoptFid = (syncSt.adoptCloudOnce === fid) ? fid : null;
 
     return client.from('family_settings').select('migration_state').eq('family_id', fid).maybeSingle()
       .then(function (r0) {
@@ -414,6 +477,25 @@ var SGASync = (function () {
           var jobs = cloudKids.map(function (ck) {
             var cid = ck.child_id;
             if (st.children[cid]) {
+              if (adoptFid) {
+                /* 加入家庭首拉：孩子资料无条件采纳云端 */
+                var prof = null;
+                for (var pi = 0; pi < st.childrenList.length; pi++) {
+                  if (st.childrenList[pi] && st.childrenList[pi].id === cid) { prof = st.childrenList[pi]; break; }
+                }
+                if (prof) {
+                  if (prof.name !== ck.name) { prof.name = ck.name; changedAny = true; }
+                  if ((prof.gender || '') !== (ck.gender || '')) { prof.gender = ck.gender || ''; changedAny = true; }
+                  if ((prof.grade || '') !== (ck.grade || '')) { prof.grade = ck.grade || ''; changedAny = true; }
+                  if ((prof.avatar || '') !== (ck.avatar || '')) { prof.avatar = ck.avatar || ''; changedAny = true; }
+                  if ((prof.banner || '') !== (ck.banner || '')) { prof.banner = ck.banner || ''; changedAny = true; }
+                }
+                /* 预置游标：本地配置视为"自上次同步未改且云端较新"，强制采纳云端 */
+                _cfgMeta(syncSt)['task:' + cid] = {
+                  h: _hashCfg(st.children[cid].taskConfig || {}),
+                  cloud: '1970-01-01T00:00:00.000Z'
+                };
+              }
               return mergeChildFromCloud(cid, st.children[cid], syncSt).then(function (changed) {
                 if (changed) changedAny = true;
               });
@@ -444,6 +526,13 @@ var SGASync = (function () {
                 if (r2.error) throw r2.error;
                 var row = r2.data;
                 if (!row || !row.data) return;
+                /* 加入家庭首拉：家庭共享奖励配置同样无条件采纳云端 */
+                if (adoptFid) {
+                  _cfgMeta(syncSt).reward = {
+                    h: _hashCfg(st.rewardConfig || {}),
+                    cloud: '1970-01-01T00:00:00.000Z'
+                  };
+                }
                 if (!st.rewardConfig) {
                   st.rewardConfig = row.data;
                   _cfgMeta(syncSt).reward = { h: _hashCfg(row.data), cloud: row.updated_at };
@@ -462,6 +551,12 @@ var SGASync = (function () {
         });
       })
       .then(function () {
+        /* 加入家庭首拉完成：清除 adopt 标记，本设备恢复正常推送。
+           失败路径保留标记，下次拉取继续以云端为准，期间推送保持禁止 */
+        if (syncSt.adoptCloudOnce === fid) {
+          delete syncSt.adoptCloudOnce;
+          _saveLocal(syncSt);
+        }
         if (changedAny) {
           if (typeof saveState === 'function') saveState(st);
           _saveLocal(syncSt);
@@ -533,6 +628,9 @@ var SGASync = (function () {
     signOut: signOut,
     pushNow: pushNow,
     pullAndMerge: pullAndMerge,
-    syncAll: syncAll
+    syncAll: syncAll,
+    getFamilyInfo: getFamilyInfo,
+    regenerateInviteCode: regenerateInviteCode,
+    joinFamily: joinFamily
   };
 })();
