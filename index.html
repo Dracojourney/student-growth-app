@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#FAF8EE" />
+  <title>家庭习惯打卡</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css?v=20261018c1" />
+</head>
+<body>
+  <div id="app" class="app">
+    <main id="page-content" class="page-content" aria-live="polite"></main>
+    <nav id="bottom-nav" class="bottom-nav" role="navigation" aria-label="主导航">
+      <button class="nav-item is-active" data-page="checkin" type="button">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9 21v-6h6v6"/></svg></span>
+        <span class="nav-label">今天打卡</span>
+      </button>
+      <button class="nav-item" data-page="rewards" type="button">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg></span>
+        <span class="nav-label">积分兑换</span>
+      </button>
+      <button class="nav-item" data-page="parent" type="button">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg></span>
+        <span class="nav-label">家长管理</span>
+      </button>
+    </nav>
+  </div>
+  <div id="modal-root" class="modal-root" hidden></div>
+  <div id="toast-root" class="toast-root" aria-live="assertive"></div>
+  <script src="js/data.js?v=20261018c1"></script>
+  <script src="js/store.js?v=20261018c1"></script>
+  <script src="js/app.js?v=20261018c1"></script>
+</body>
+</html>
