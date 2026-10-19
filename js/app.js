@@ -1058,6 +1058,15 @@ function openSyncSheet() {
     info.textContent = lines;
     form.appendChild(info);
 
+    /* 孩子设备接入引导：家长在此设备登录一次即可，孩子无需知道邮箱密码 */
+    const kidHint = document.createElement('div');
+    kidHint.className = 'tm-form-note';
+    kidHint.style.cssText = 'background:#eef7ff;border-left:3px solid #4a9eff;padding:10px 12px;margin-top:10px;line-height:1.6;';
+    kidHint.innerHTML = '📱 <b>孩子设备设置</b><br>' +
+      '家长在本设备登录一次后，孩子以后打开应用可<b>直接打卡/兑换</b>，无需重复登录。<br>' +
+      '退出登录需家长密码，孩子无法误操作登出。';
+    form.appendChild(kidHint);
+
     /* 阶段3C：家庭信息（邀请码/成员列表，异步填充）+ 加入其他家庭入口 */
     const famBox = document.createElement('div');
     famBox.className = 'sync-family';
@@ -1089,13 +1098,15 @@ function openSyncSheet() {
     outBtn.type = 'button';
     outBtn.textContent = '退出登录';
     outBtn.addEventListener('click', () => {
-      outBtn.disabled = true;
-      SGASync.signOut().then(() => {
-        closeModal();
-        showToast('已退出登录，数据保留在本机');
-      }).catch(err => {
-        outBtn.disabled = false;
-        showToast('退出失败：' + (err && err.message ? err.message : '未知错误'));
+      showParentPinModal('退出登录需家长验证', () => {
+        outBtn.disabled = true;
+        SGASync.signOut().then(() => {
+          closeModal();
+          showToast('已退出登录，数据保留在本机');
+        }).catch(err => {
+          outBtn.disabled = false;
+          showToast('退出失败：' + (err && err.message ? err.message : '未知错误'));
+        });
       });
     });
     actions.appendChild(outBtn);
@@ -1150,6 +1161,49 @@ function renderParentGate() {
     if (code.length === 4) {
       if (verifyParent(code)) { showToast('验证成功'); render(); }
       else { showToast('密码错误，请重试'); code = ''; updateDots(); }
+    }
+  }));
+}
+
+/* 家长 PIN 弹窗：用于保护退出登录等敏感操作，防止孩子误操作 */
+function showParentPinModal(title, onSuccess) {
+  const sheet = document.createElement('div');
+  sheet.className = 'tm-modal';
+  sheet.innerHTML = `<div class="tm-modal-card" style="width:300px;">
+    <div class="parent-gate" style="padding:20px 0;">
+      <div class="gate-lock">${SVG.lock}</div>
+      <div class="gate-title">${title}</div>
+      <div class="gate-sub">请输入 4 位家长密码</div>
+      <div class="gate-dots">${[0,1,2,3].map(() => '<div class="gate-dot"></div>').join('')}</div>
+      <div class="gate-pad">
+        ${[1,2,3,4,5,6,7,8,9].map(n => `<button class="gate-key" data-key="${n}" type="button">${n}</button>`).join('')}
+        <button class="gate-key" data-key="clear" type="button" style="font-size:16px;">清除</button>
+        <button class="gate-key" data-key="0" type="button">0</button>
+        <button class="gate-key" data-key="del" type="button" style="font-size:16px;">⌫</button>
+      </div>
+    </div>
+  </div>`;
+  modalRoot.hidden = false;
+  modalRoot.innerHTML = '';
+  modalRoot.classList.add('is-centered');
+  modalRoot.appendChild(sheet);
+  let code = '';
+  const dots = sheet.querySelectorAll('.gate-dot');
+  const updateDots = () => dots.forEach((d, i) => d.classList.toggle('is-filled', i < code.length));
+  sheet.querySelectorAll('.gate-key').forEach(k => k.addEventListener('click', () => {
+    const v = k.dataset.key;
+    if (v === 'clear') code = '';
+    else if (v === 'del') code = code.slice(0, -1);
+    else if (code.length < 4) code += v;
+    updateDots();
+    if (code.length === 4) {
+      if (verifyParent(code)) {
+        closeModal();
+        onSuccess && onSuccess();
+      } else {
+        showToast('密码错误，请重试');
+        code = ''; updateDots();
+      }
     }
   }));
 }
