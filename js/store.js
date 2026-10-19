@@ -1014,21 +1014,23 @@ function undoOtherReward(childId, historyId) {
   return { success: true, amount, points: cs.points };
 }
 
-/* ---------- 初始积分（可多次录入历史积分）----------
-   每次提交都是一次独立的积分增加：amount>0 生成独立 type:'initial' 流水；
-   amount=0 不加分、不产生流水。initialPointsGranted 字段保留作历史兼容信息，
-   不再作为阻止后续录入的条件。编辑孩子资料不会触发初始积分发放。 */
+/* ---------- 初始积分（设为指定值，多次设置不累计）----------
+   语义：把孩子当前积分余额直接设为 amount，以当次设置值为准。
+   实现：按"目标值 - 当前余额"的差额写一条流水——
+   差额>0 写 type:'initial'（正类，加分）；差额<0 写 type:'revoke'（负类，减分）；
+   差额=0 不写流水。本地与云端触发器的余额都按流水重算，因此覆盖语义天然成立。
+   注意：差额基于本机当前余额，多设备场景请先同步再设置。 */
 function _isValidInitialAmount(v) {
   return typeof v === 'number' && isFinite(v) && Math.floor(v) === v && v >= 0 && v <= 1000000;
 }
 
-/* 汇总初始积分：total 为全部 type:'initial' 流水金额之和，count 为录入次数。 */
+/* 初始积分状态：points 为当前余额（供表单预填）；total/count 为历史 initial 流水统计，仅作参考。 */
 function getInitialPointsStatus(childId) {
   const cs = getChildState(childId);
   if (!cs) return null;
   const entries = (Array.isArray(cs.pointsHistory) ? cs.pointsHistory : []).filter(h => h && h.type === 'initial' && typeof h.amount === 'number');
   const total = entries.reduce((s, h) => s + h.amount, 0);
-  return { granted: entries.length > 0 || cs.initialPointsGranted === true, total, count: entries.length };
+  return { granted: entries.length > 0 || cs.initialPointsGranted === true, total, count: entries.length, points: cs.points };
 }
 
 function grantInitialPoints(childId, amount) {
@@ -1036,13 +1038,24 @@ function grantInitialPoints(childId, amount) {
   if (!cs) return { success: false, reason: 'invalid_child' };
   if (!_isValidInitialAmount(amount)) return { success: false, reason: 'invalid_amount' };
   cs.initialPointsGranted = true;
-  if (amount > 0) {
-    const entry = addPoints(childId, amount, '初始积分', { type: 'initial' });
+  const delta = amount - cs.points;
+  if (delta > 0) {
+    const entry = addPoints(childId, delta, '初始积分', { type: 'initial' });
     saveState(_state);
-    return { success: true, amount, points: cs.points, historyId: entry.id };
+    return { success: true, amount, points: cs.points, delta, historyId: entry.id };
+  }
+  if (delta < 0) {
+    const reduce = -delta;
+    cs.points -= reduce;
+    cs.pointsHistory.unshift({
+      id: 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+      type: 'revoke', amount: reduce, desc: '初始积分调整', time: Date.now()
+    });
+    saveState(_state);
+    return { success: true, amount, points: cs.points, delta };
   }
   saveState(_state);
-  return { success: true, amount: 0, points: cs.points };
+  return { success: true, amount, points: cs.points, delta: 0 };
 }
 
 function redeemReward(childId, reward) {

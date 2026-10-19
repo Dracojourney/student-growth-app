@@ -406,7 +406,6 @@ function openChildDetail(childId) {
   if (!c) return;
   const cs = getChildState(childId);
   const tasks = getChildTasks(childId);
-  const init = getInitialPointsStatus(childId) || { granted: false, total: 0, count: 0 };
   showSheet(`<div class="sheet-title">${c.name} 的信息</div>
     <div class="record-row"><img class="record-icon" src="${c.avatar}" alt="" style="border-radius:12px;"><div class="record-info"><div class="r-name">${c.name}（${c.grade}）</div><div class="r-time">当前积分：${cs.points} · 今日任务 ${tasks.length} 项</div></div></div>
     <div style="max-height:38vh;overflow-y:auto;margin-top:8px;">
@@ -414,8 +413,7 @@ function openChildDetail(childId) {
     </div>
     <div class="child-detail-actions">
       <button class="btn btn-primary" id="other-reward-btn" type="button">🎁 其他奖励（直接加分）</button>
-      <button class="btn btn-secondary" id="init-points-btn" type="button">录入初始积分</button>
-      ${init.count > 0 ? `<span class="init-points-note">已累计录入初始积分 +${init.total} 分（${init.count} 次），可继续录入</span>` : ''}
+      <button class="btn btn-secondary" id="init-points-btn" type="button">设置初始积分</button>
       <button class="btn btn-danger" id="delete-child-btn" type="button">删除孩子</button>
     </div>`);
   const otherBtn = document.getElementById('other-reward-btn');
@@ -514,8 +512,8 @@ function openOtherRewardForm(childId) {
   modalRoot.appendChild(sheet);
 }
 
-/* 初始积分：录入孩子开始使用本应用前已积累的历史积分。
-   可多次录入，每次独立计入余额并生成 type:'initial' 流水。 */
+/* 初始积分：把孩子当前积分余额直接设为所填数值（不累计，以当次设置值为准）。
+   差额>0 自动补足、差额<0 自动扣减，各生成一条对应流水。 */
 function openInitialPointsForm(childId) {
   const child = getChildProfile(childId);
   if (!child) return;
@@ -530,17 +528,17 @@ function openInitialPointsForm(childId) {
 
   const title = document.createElement('div');
   title.className = 'sheet-title';
-  title.textContent = '录入初始积分 · ' + child.name;
+  title.textContent = '设置初始积分 · ' + child.name;
   panel.appendChild(title);
 
   const form = document.createElement('div');
   form.className = 'tm-form';
-  const amountField = tmCreateField('初始积分（0-1000000 的非负整数）', 'number', '0');
+  const curPoints = status && typeof status.points === 'number' ? status.points : 0;
+  const amountField = tmCreateField('设为积分值（0-1000000 的非负整数）', 'number', String(curPoints));
   form.appendChild(amountField.wrap);
   const note = document.createElement('div');
   note.className = 'tm-form-note';
-  note.textContent = (status && status.count > 0 ? '已累计录入 +' + status.total + ' 分（' + status.count + ' 次）。' : '')
-    + '用于录入孩子开始使用本应用前已积累的历史积分；可多次录入，每次独立计入余额并生成流水。';
+  note.textContent = '当前余额 ' + curPoints + ' 分。保存后余额将直接设为所填数值：高于余额自动补足差额，低于余额自动扣减差额；多次设置不累计，以当次设置值为准。';
   form.appendChild(note);
   panel.appendChild(form);
 
@@ -558,7 +556,7 @@ function openInitialPointsForm(childId) {
   saveBtn.textContent = '确认保存';
   let submitting = false;
   saveBtn.addEventListener('click', () => {
-    if (submitting) return; /* 防本次重复提交；保存后仍可再次录入 */
+    if (submitting) return;
     const amount = parseInt(amountField.input.value, 10);
     const res = grantInitialPoints(childId, amount);
     if (!res.success) {
@@ -568,7 +566,8 @@ function openInitialPointsForm(childId) {
     submitting = true;
     saveBtn.disabled = true;
     closeModal();
-    showToast(amount > 0 ? '初始积分 +' + amount + ' 已计入，当前 ' + res.points + ' 积分' : '本次录入 0 分，余额未变');
+    const deltaText = res.delta > 0 ? '（补入 +' + res.delta + '）' : res.delta < 0 ? '（扣减 ' + res.delta + '）' : '（余额未变）';
+    showToast('已设为 ' + res.points + ' 积分' + deltaText);
     openChildDetail(childId);
     render();
   });
