@@ -43,6 +43,7 @@ var SGASync = (function () {
   var _listeners = [];
   var _pushTimer = 0;
   var _initializing = false;
+  var _familyUserId = null; /* 当前 _familyId 归属的用户 id，用于识别重复 auth 事件 */
 
   function _loadLocal() {
     try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch (e) { return {}; }
@@ -138,8 +139,15 @@ var SGASync = (function () {
       var fid = res.data;
       if (!fid) throw new Error('加入失败：服务器未返回家庭标识');
       _familyId = fid;
-      /* 整体替换：本机业务数据与游标作废；写入 adopt 标记供重启后首拉使用 */
-      try { localStorage.removeItem(BIZ_KEY); } catch (e) {}
+      /* 整体替换：本机业务数据与游标作废；写入 adopt 标记供重启后首拉使用。
+         清除前先把本机业务数据备份到 sga_pre_adopt_backup_v1（一次性保险） */
+      try {
+        var prevBiz = localStorage.getItem(BIZ_KEY);
+        if (prevBiz && !localStorage.getItem('sga_pre_adopt_backup_v1')) {
+          localStorage.setItem('sga_pre_adopt_backup_v1', prevBiz);
+        }
+        localStorage.removeItem(BIZ_KEY);
+      } catch (e) {}
       _saveLocal({ adoptCloudOnce: fid });
       return fid;
     });
@@ -168,6 +176,11 @@ var SGASync = (function () {
     return h.toString(16);
   }
   function _cfgMeta(syncSt) { if (!syncSt.cfg) syncSt.cfg = {}; return syncSt.cfg; }
+  /* 孩子资料哈希对象（不含 points/sort_order：余额常变、排序暂不参与同步） */
+  function _profObj(p) {
+    return { name: p.name || '', gender: p.gender || '', grade: p.grade || '',
+             avatar: p.avatar || '', banner: p.banner || '' };
+  }
 
   /* ---------- 推送（增量：流水/打卡/兑换按时间游标，配置按内容哈希门控）---------- */
   function pushNow() {
@@ -192,15 +205,25 @@ var SGASync = (function () {
       ? client.from('children').delete().eq('family_id', fid).in('child_id', removed)
       : Promise.resolve({ error: null });
 
-    /* 2) 孩子资料（含余额快照；云端最终以触发器重算为准） */
-    var childrenRows = st.childrenList.map(function (c, i) {
+    /* 2) 孩子资料（含余额快照；云端最终以触发器重算为准）
+       资料哈希门控：与任务配置同规则——资料未变不推送，避免
+       每台设备用自己的资料反复覆盖云端（否则资料永不互相同步） */
+    var profMetaUpdates = [];
+    var childrenRows = [];
+    st.childrenList.forEach(function (c, i) {
       var cs = st.children[c.id] || {};
-      return {
-        family_id: fid, child_id: c.id, name: c.name,
-        gender: c.gender || null, grade: c.grade || null,
-        avatar: c.avatar || null, banner: c.banner || null,
-        sort_order: i, points: cs.points || 0, updated_at: nowIso
-      };
+      var pH = _hashCfg(_profObj(c));
+      var pKey = 'prof:' + c.id;
+      var pM = _cfgMeta(syncSt)[pKey];
+      if (!pM || pM.h !== pH) {
+        childrenRows.push({
+          family_id: fid, child_id: c.id, name: c.name,
+          gender: c.gender || null, grade: c.grade || null,
+          avatar: c.avatar || null, banner: c.banner || null,
+          sort_order: i, points: cs.points || 0, updated_at: nowIso
+        });
+        profMetaUpdates.push({ key: pKey, h: pH });
+      }
     });
     var childrenJob = childrenRows.length
       ? client.from('children').upsert(childrenRows)
@@ -287,12 +310,15 @@ var SGASync = (function () {
           return j.then(function (r) { if (r && r.error) throw r.error; });
         })).then(function () { return cfgMetaUpdates; });
       })
-      .then(function (cfgMetaUpdates) {
-        cfgMetaUpdates.forEach(function (u) { _cfgMeta(syncSt)[u.key] = { h: u.h, cloud: nowIso }; });
-        /* 清理已删除孩子的配置游标 */
+      .then(function (metaUpdates) {
+        return metaUpdates.concat(profMetaUpdates);
+      })
+      .then(function (metaUpdates) {
+        metaUpdates.forEach(function (u) { _cfgMeta(syncSt)[u.key] = { h: u.h, cloud: nowIso }; });
+        /* 清理已删除孩子的配置/资料游标 */
         if (syncSt.cfg) {
           Object.keys(syncSt.cfg).forEach(function (k) {
-            if (k.indexOf('task:') === 0 && curIds.indexOf(k.slice(5)) === -1) delete syncSt.cfg[k];
+            if ((k.indexOf('task:') === 0 || k.indexOf('prof:') === 0) && curIds.indexOf(k.slice(5)) === -1) delete syncSt.cfg[k];
           });
         }
         syncSt.childIds = curIds;
@@ -459,13 +485,18 @@ var SGASync = (function () {
     if (!_user || !_familyId || _syncing) return Promise.resolve(false);
     var st = (typeof getAppState === 'function') ? getAppState() : null;
     if (!st) return Promise.resolve(false);
-    _syncing = true; _notify();
+    _syncing = true; _lastError = ''; _notify();
     var fid = _familyId;
     var changedAny = false;
     var syncSt = _loadLocal();
     /* 加入家庭后的首次拉取：一切以云端为准（资料/配置无条件采纳），
        拉取成功后清除该标记恢复正常同步 */
     var adoptFid = (syncSt.adoptCloudOnce === fid) ? fid : null;
+    /* 首次同步引导：本设备从未同步过（无游标）且云端家庭已有数据时，
+       说明是"后来加入的设备"——登录后第一次拉取以云端为准（资料/配置
+       无条件采纳，流水/打卡/兑换并集合并），避免本机旧种子数据反向
+       覆盖云端。云端为空则走既有迁移路径（首台设备上传本地数据）。 */
+    var bootAdopt = !adoptFid && !syncSt.initialized;
 
     return client.from('family_settings').select('migration_state').eq('family_id', fid).maybeSingle()
       .then(function (r0) {
@@ -477,22 +508,55 @@ var SGASync = (function () {
           var cloudIds = {};
           cloudKids.forEach(function (ck) { cloudIds[ck.child_id] = 1; });
 
+          var effAdopt = adoptFid ||
+            (bootAdopt && cloudKids.length > 0 &&
+             Array.isArray(st.childrenList) && st.childrenList.length > 0);
+          if (effAdopt && !adoptFid) {
+            /* 首登采纳前备份本机业务数据（一次性保险，不覆盖已有备份；
+               全新设备无业务数据时不写空备份——键缺失=无需恢复） */
+            try {
+              var rawBiz = localStorage.getItem(BIZ_KEY);
+              if (rawBiz && !localStorage.getItem('sga_pre_adopt_backup_v1')) {
+                localStorage.setItem('sga_pre_adopt_backup_v1', rawBiz);
+              }
+            } catch (e) {}
+          }
+
           var jobs = cloudKids.map(function (ck) {
             var cid = ck.child_id;
             if (st.children[cid]) {
-              if (adoptFid) {
-                /* 加入家庭首拉：孩子资料无条件采纳云端 */
-                var prof = null;
-                for (var pi = 0; pi < st.childrenList.length; pi++) {
-                  if (st.childrenList[pi] && st.childrenList[pi].id === cid) { prof = st.childrenList[pi]; break; }
+              var prof = null;
+              for (var pi = 0; pi < st.childrenList.length; pi++) {
+                if (st.childrenList[pi] && st.childrenList[pi].id === cid) { prof = st.childrenList[pi]; break; }
+              }
+              if (prof) {
+                var pKey = 'prof:' + cid;
+                if (effAdopt) {
+                  /* 加入家庭/首登引导：孩子资料无条件采纳云端 */
+                  var changedProf = false;
+                  if (prof.name !== ck.name) { prof.name = ck.name; changedProf = true; }
+                  if ((prof.gender || '') !== (ck.gender || '')) { prof.gender = ck.gender || ''; changedProf = true; }
+                  if ((prof.grade || '') !== (ck.grade || '')) { prof.grade = ck.grade || ''; changedAny = changedProf = true; }
+                  if ((prof.avatar || '') !== (ck.avatar || '')) { prof.avatar = ck.avatar || ''; changedProf = true; }
+                  if ((prof.banner || '') !== (ck.banner || '')) { prof.banner = ck.banner || ''; changedProf = true; }
+                  if (changedProf) changedAny = true;
+                  _cfgMeta(syncSt)[pKey] = { h: _hashCfg(_profObj(ck)), cloud: ck.updated_at || null };
+                } else {
+                  /* 常规路径：云端更新且本地自上次同步后未改（哈希一致）→ 采纳云端资料 */
+                  var pM = _cfgMeta(syncSt)[pKey];
+                  if (pM && pM.h === _hashCfg(_profObj(prof)) &&
+                      (Date.parse(ck.updated_at) || 0) > (Date.parse(pM.cloud) || 0)) {
+                    prof.name = ck.name;
+                    prof.gender = ck.gender || '';
+                    prof.grade = ck.grade || '';
+                    prof.avatar = ck.avatar || '';
+                    prof.banner = ck.banner || '';
+                    _cfgMeta(syncSt)[pKey] = { h: _hashCfg(_profObj(ck)), cloud: ck.updated_at };
+                    changedAny = true;
+                  }
                 }
-                if (prof) {
-                  if (prof.name !== ck.name) { prof.name = ck.name; changedAny = true; }
-                  if ((prof.gender || '') !== (ck.gender || '')) { prof.gender = ck.gender || ''; changedAny = true; }
-                  if ((prof.grade || '') !== (ck.grade || '')) { prof.grade = ck.grade || ''; changedAny = true; }
-                  if ((prof.avatar || '') !== (ck.avatar || '')) { prof.avatar = ck.avatar || ''; changedAny = true; }
-                  if ((prof.banner || '') !== (ck.banner || '')) { prof.banner = ck.banner || ''; changedAny = true; }
-                }
+              }
+              if (effAdopt) {
                 /* 预置游标：本地配置视为"自上次同步未改且云端较新"，强制采纳云端 */
                 _cfgMeta(syncSt)['task:' + cid] = {
                   h: _hashCfg(st.children[cid].taskConfig || {}),
@@ -508,6 +572,7 @@ var SGASync = (function () {
               st.children[cid] = built.cs;
               st.childrenList.push(built.profile);
               _cfgMeta(syncSt)['task:' + cid] = { h: _hashCfg(built.cs.taskConfig), cloud: built.cfgUpdatedAt };
+              _cfgMeta(syncSt)['prof:' + cid] = { h: _hashCfg(_profObj(built.profile)), cloud: ck.updated_at || null };
               changedAny = true;
             });
           });
@@ -529,8 +594,8 @@ var SGASync = (function () {
                 if (r2.error) throw r2.error;
                 var row = r2.data;
                 if (!row || !row.data) return;
-                /* 加入家庭首拉：家庭共享奖励配置同样无条件采纳云端 */
-                if (adoptFid) {
+                /* 加入家庭/首登引导：家庭共享奖励配置同样无条件采纳云端 */
+                if (effAdopt) {
                   _cfgMeta(syncSt).reward = {
                     h: _hashCfg(st.rewardConfig || {}),
                     cloud: '1970-01-01T00:00:00.000Z'
@@ -560,6 +625,11 @@ var SGASync = (function () {
           delete syncSt.adoptCloudOnce;
           _saveLocal(syncSt);
         }
+        /* 拉取成功即标记"已初始化"：此后本设备走常规哈希门控双向同步 */
+        if (!syncSt.initialized) {
+          syncSt.initialized = true;
+          _saveLocal(syncSt);
+        }
         if (changedAny) {
           if (typeof saveState === 'function') saveState(st);
           _saveLocal(syncSt);
@@ -577,35 +647,45 @@ var SGASync = (function () {
 
   function syncAll() {
     if (!_user || !_familyId) return Promise.resolve(false);
-    return pullAndMerge().then(function () { return pushNow(); });
+    return pullAndMerge().then(function () {
+      /* 拉取失败（_lastError 非空）时不推送，防止本机旧数据覆盖云端 */
+      return _lastError ? false : pushNow();
+    });
   }
 
   /* ---------- 事件接线 ---------- */
   if (client) {
     client.auth.onAuthStateChange(function (event, session) {
       _user = (session && session.user) ? { id: session.user.id, email: session.user.email } : null;
-      _familyId = null;
-      _lastError = '';
-      if (_user) {
-        if (_initializing) return;
-        _initializing = true;
-        ensureFamily().then(function (fid) {
-          _familyId = fid;
-          return pullAndMerge();
-        }).then(function () {
-          /* 登录后立即推送一次：首登把本地数据迁移上云；后续登录为空增量，幂等 */
-          return pushNow();
-        }).then(function () {
-          _initializing = false;
-          _notify();
-        }).catch(function (err) {
-          _initializing = false;
-          _lastError = String((err && err.message) || err);
-          _notify();
-        });
-      } else {
-        _notify();
+      if (!_user) {
+        _familyId = null; _familyUserId = null; _initializing = false;
+        _lastError = ''; _notify();
+        return;
       }
+      /* 重复事件（SIGNED_IN 回声 / TOKEN_REFRESHED）不得清空 _familyId：
+         若先置空再因 _initializing 提前返回，familyId 会被永久留在 null，
+         设备停留在"已登录但静默失联"状态，推送与拉取全部空转
+         （多设备同步失效的第二个根因，已在 E2E 中实际复现） */
+      if (_familyId && _familyUserId === _user.id) return;
+      if (_initializing) { _familyUserId = _user.id; return; }
+      _initializing = true;
+      _familyUserId = _user.id;
+      _lastError = '';
+      ensureFamily().then(function (fid) {
+        _familyId = fid;
+        return pullAndMerge();
+      }).then(function () {
+        /* 登录后立即推送一次：首登把本地数据迁移上云；后续登录为空增量，幂等。
+           首拉失败（_lastError 非空）时不推送，防止本机旧数据覆盖云端 */
+        return _lastError ? null : pushNow();
+      }).then(function () {
+        _initializing = false;
+        _notify();
+      }).catch(function (err) {
+        _initializing = false;
+        _lastError = String((err && err.message) || err);
+        _notify();
+      });
     });
     /* 每次本地保存 → 防抖推送 */
     if (typeof window.saveState === 'function') {
@@ -616,10 +696,23 @@ var SGASync = (function () {
         return r;
       };
     }
-    /* 回到前台 → 先拉后推（多设备同步窗口） */
+    /* 回到前台 → 先拉后推（多设备同步窗口）。
+       切到后台/关闭页面 → 立即冲刷待推送改动：Chrome 对后台标签页的
+       setTimeout 强力节流（可延迟到分钟级），防抖定时器在后台不可靠，
+       不冲刷的话用户"改完信息切走"的改动会一直滞留本机不上云，
+       另一台设备就永远看不到（多设备同步失效的主要根因）。 */
+    function _flushPendingPush() {
+      if (_pushTimer) {
+        clearTimeout(_pushTimer);
+        _pushTimer = 0;
+        pushNow();
+      }
+    }
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden && _user && _familyId) syncAll();
+      if (document.hidden) { _flushPendingPush(); return; }
+      if (_user && _familyId) syncAll();
     });
+    window.addEventListener('pagehide', _flushPendingPush);
   }
 
   return {
