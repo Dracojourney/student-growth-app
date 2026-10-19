@@ -80,6 +80,12 @@ var SGASync = (function () {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
     return client.auth.signOut();
   }
+  /* 重发邮箱确认邮件（当前项目已关闭邮箱确认，此接口为防御性保留，
+     将来若重新开启验证时可直接调用，无需改 sync.js 结构） */
+  function resendConfirmationEmail(email) {
+    if (!available()) return Promise.reject(new Error('云同步组件未加载'));
+    return client.auth.resend({ type: 'signup', email: email });
+  }
 
   /* ---------- 家庭绑定 ----------
      使用 0003 迁移的 ensure_my_family() RPC：advisory lock 原子化，
@@ -722,6 +728,7 @@ var SGASync = (function () {
     signUp: signUp,
     signIn: signIn,
     signOut: signOut,
+    resendConfirmationEmail: resendConfirmationEmail,
     pushNow: pushNow,
     pullAndMerge: pullAndMerge,
     syncAll: syncAll,

@@ -1008,7 +1008,17 @@ function openSyncSheet() {
       }).catch(err => {
         loginBtn.disabled = false;
         loginBtn.textContent = '登录';
-        showToast('登录失败：' + (err && err.message ? err.message : '未知错误'));
+        var msg = (err && err.message) ? String(err.message) : '未知错误';
+        /* Supabase 常见英文错误 → 中文提示，避免用户看不懂卡住 */
+        if (/email not confirmed/i.test(msg)) {
+          showToast('邮箱尚未确认，请先查收邮件（含垃圾邮件）点击确认链接，或重发确认邮件');
+        } else if (/invalid login credentials/i.test(msg)) {
+          showToast('邮箱或密码错误，请重试');
+        } else if (/user not found/i.test(msg)) {
+          showToast('该邮箱尚未注册，请先注册');
+        } else {
+          showToast('登录失败：' + msg);
+        }
       });
     });
 
@@ -1026,7 +1036,7 @@ function openSyncSheet() {
         } else {
           regBtn.disabled = false;
           regBtn.textContent = '注册';
-          showToast('注册成功，请先通过邮箱确认邮件后再登录');
+          showToast('注册成功，请查收邮箱（含垃圾邮件）点击确认链接后再登录');
         }
       }).catch(err => {
         regBtn.disabled = false;
