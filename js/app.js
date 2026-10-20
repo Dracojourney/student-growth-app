@@ -538,7 +538,7 @@ function openInitialPointsForm(childId) {
   form.appendChild(amountField.wrap);
   const note = document.createElement('div');
   note.className = 'tm-form-note';
-  note.textContent = '当前余额 ' + curPoints + ' 分。保存后余额将直接设为所填数值：高于余额自动补足差额，低于余额自动扣减差额；多次设置不累计，以当次设置值为准。';
+  note.textContent = '当前余额 ' + curPoints + ' 分。保存后余额将直接设为所填数值：高于余额自动补足差额，低于余额自动扣减差额；多次设置不累计，以当次设置值为准。已登录时保存会先自动同步最新数据再设置，确保填多少最终就是多少。';
   form.appendChild(note);
   panel.appendChild(form);
 
@@ -558,18 +558,36 @@ function openInitialPointsForm(childId) {
   saveBtn.addEventListener('click', () => {
     if (submitting) return;
     const amount = parseInt(amountField.input.value, 10);
-    const res = grantInitialPoints(childId, amount);
-    if (!res.success) {
-      showToast('请输入 0-1000000 的非负整数');
-      return;
-    }
     submitting = true;
     saveBtn.disabled = true;
-    closeModal();
-    const deltaText = res.delta > 0 ? '（补入 +' + res.delta + '）' : res.delta < 0 ? '（扣减 ' + res.delta + '）' : '（余额未变）';
-    showToast('已设为 ' + res.points + ' 积分' + deltaText);
-    openChildDetail(childId);
-    render();
+    /* 执行设置：差额流水按"当时的本机余额"计算 */
+    const doGrant = () => {
+      const res = grantInitialPoints(childId, amount);
+      if (!res.success) {
+        submitting = false;
+        saveBtn.disabled = false;
+        saveBtn.textContent = '确认保存';
+        showToast('请输入 0-1000000 的非负整数');
+        return;
+      }
+      closeModal();
+      const deltaText = res.delta > 0 ? '（补入 +' + res.delta + '）' : res.delta < 0 ? '（扣减 ' + res.delta + '）' : '（余额未变）';
+      showToast('已设为 ' + res.points + ' 积分' + deltaText);
+      openChildDetail(childId);
+      render();
+    };
+    /* 用户要求"填多少最终就显示多少"：差额基于本机余额计算，
+       已登录时先同步拉取最新余额再设置，避免其他设备未同步的变动导致最终值偏离；
+       同步失败仍允许设置（按本机余额），但明确提示。设置后的流水由自动推送上云。 */
+    if (window.SGASync && SGASync.available() && SGASync.status().signedIn) {
+      saveBtn.textContent = '同步中…';
+      SGASync.syncAll().then(ok => {
+        if (!ok) showToast('未能拉取最新数据，本次按本机余额设置');
+        doGrant();
+      });
+    } else {
+      doGrant();
+    }
   });
   actions.appendChild(saveBtn);
   panel.appendChild(actions);
