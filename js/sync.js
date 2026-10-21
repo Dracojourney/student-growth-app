@@ -43,7 +43,9 @@ var SGASync = (function () {
      标志拦住，整条 syncAll 静默以 lastError='' 结束"（用户实际报"未知错误"
      根因，2026-10-21 修复）。 */
   var _pulling = false;
+  var _pendingPull = null; /* 正在进行的 pullAndMerge Promise */
   var _pushing = false;
+  var _pendingPush = null; /* 正在进行的 pushNow Promise，用于合并并发调用 */
   var _lastError = '';
   var _lastSyncAt = 0;
   var _listeners = [];
@@ -197,9 +199,12 @@ var SGASync = (function () {
   /* ---------- 推送（增量：流水/打卡/兑换按时间游标，配置按内容哈希门控）---------- */
   function pushNow() {
     if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
-    /* 推送重入守卫（与 pullAndMerge 独立）——后台防抖推送正在跑时，
-       syncAll 串行调用 pushNow 不会被这个守卫拦，因为 pull 阶段早已完成 */
-    if (_pushing) { _lastError = '推送已在进行中，请稍后'; _notify(); return Promise.resolve(false); }
+    /* 重入守卫改为"合并到同一个 Promise"而不是拒绝：
+       syncAll → pullAndMerge 正在跑（几百毫秒）期间，后台 schedulePush 的 2s
+       定时器可能抢先启动 pushNow，随后 syncAll pull 完调 pushNow 会被旧的硬拦
+       返回 false + "推送正在进行中"，用户看到同步失败。合并模式下，两次调用
+       等同一个 Promise 跑完就行，不报错、不丢数据。 */
+    if (_pushing) return _pendingPush;
     /* 加入家庭后的首拉完成前禁止一切推送：本机仍是种子/旧数据，
        回写会覆盖家庭云端真实数据（adoptCloudOnce 游标由 pullAndMerge 清除） */
     if (_loadLocal().adoptCloudOnce) { _lastError = '首次云端拉取未完成，暂时不推送'; _notify(); return Promise.resolve(false); }
@@ -244,7 +249,8 @@ var SGASync = (function () {
       ? client.from('children').upsert(childrenRows)
       : Promise.resolve({ error: null });
 
-    return delJob.then(function (r) { if (r.error) throw r.error; return childrenJob; })
+    /* 把整条 push 链存进 _pendingPush，让后续重入调用能等到同一个 Promise 完成 */
+    var chain = delJob.then(function (r) { if (r.error) throw r.error; return childrenJob; })
       .then(function (r) {
         if (r.error) throw r.error;
         var jobs = [];
@@ -346,7 +352,9 @@ var SGASync = (function () {
         _lastError = String((err && err.message) || err);
         return false;
       })
-      .then(function (ok) { _pushing = false; _notify(); return ok; });
+      .then(function (ok) { _pushing = false; _pendingPush = null; _notify(); return ok; });
+    _pendingPush = chain;
+    return chain;
   }
 
   function schedulePush() {
@@ -498,7 +506,7 @@ var SGASync = (function () {
 
   function pullAndMerge() {
     if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
-    if (_pulling) { _lastError = '拉取已在进行中，请稍后'; _notify(); return Promise.resolve(false); }
+    if (_pulling) return _pendingPull; /* 合并到同一个 pending Pull */
     var st = (typeof getAppState === 'function') ? getAppState() : null;
     if (!st) { _lastError = '本地状态不可用'; _notify(); return Promise.resolve(false); }
     _pulling = true; _lastError = ''; _notify();
@@ -514,7 +522,7 @@ var SGASync = (function () {
        覆盖云端。云端为空则走既有迁移路径（首台设备上传本地数据）。 */
     var bootAdopt = !adoptFid && !syncSt.initialized;
 
-    return client.from('family_settings').select('migration_state').eq('family_id', fid).maybeSingle()
+    var chain = client.from('family_settings').select('migration_state').eq('family_id', fid).maybeSingle()
       .then(function (r0) {
         if (r0.error) throw r0.error;
         var done = !!(r0.data && r0.data.migration_state && r0.data.migration_state.status === 'done');
@@ -666,7 +674,9 @@ var SGASync = (function () {
         _lastError = String((err && err.message) || err);
         return false;
       })
-      .then(function (ok) { _pulling = false; _notify(); return ok; });
+      .then(function (ok) { _pulling = false; _pendingPull = null; _notify(); return ok; });
+    _pendingPull = chain;
+    return chain;
   }
 
   function syncAll() {
