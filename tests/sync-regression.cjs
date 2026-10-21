@@ -70,6 +70,22 @@ test('authentication errors reject instead of reporting login success',async()=>
  const s=setup();await assert.rejects(s.sync.signIn('qa@example.com','wrong'),e=>e.message==='invalid credentials');
  await assert.rejects(s.sync.signUp('qa@example.com','wrong'),e=>e.message==='invalid signup');
 });
+
+test('custom task undo survives pull-before-push and reaches another device without duplicate deductions',async()=>{
+ const task='custom_123_test',day='2026-10-21',oldTime=Date.parse('2026-10-21T01:00:00Z'),newTime=oldTime+1000;
+ const cs=child();cs.checkins[day]={[task]:{completed:false,time:newTime,points:9,historyId:'earned'}};
+ cs.pointsHistory=[{id:'earned',type:'earn',amount:9,time:oldTime},{id:'undo',type:'revoke',amount:9,time:newTime}];
+ const stale={family_id:'family',child_id:'kid',day,task_id:task,completed:true,points:9,client_updated_at:new Date(oldTime).toISOString()};
+ const a=setup({local:{childrenList:[profile],children:{kid:cs}},cursor:{initialized:true,childIds:['kid']},cloud:{children:[row],family_settings:[done],checkins:[stale]}});
+ await a.login();assert.equal(a.state.children.kid.checkins[day][task].completed,false);
+ assert.equal(a.tables.checkins[0].completed,false,'undo must replace the stale cloud completion');
+ assert.equal(await a.sync.syncAll(),true);assert.equal(a.tables.points_ledger.length,2);
+ const previous=child();previous.points=9;previous.checkins[day]={[task]:{completed:true,time:oldTime,points:9,historyId:'earned'}};
+ previous.pointsHistory=[{id:'earned',type:'earn',amount:9,time:oldTime}];
+ const b=setup({local:{childrenList:[profile],children:{kid:previous}},cursor:{initialized:true,childIds:['kid']},cloud:a.tables});
+ await b.login();assert.equal(b.state.children.kid.checkins[day][task].completed,false);
+ assert.equal(b.state.children.kid.points,0);assert.equal(b.tables.points_ledger.length,2);
+});
 test('switching families never uploads the previous family state',async()=>{
  const s=setup({local:{childrenList:[profile],children:{kid:child()}},cursor:{initialized:true,familyId:'other-family',childIds:['kid']}});
  await s.login();assert.equal(s.state.childrenList.length,0);assert.equal(s.tables.children.length,0);

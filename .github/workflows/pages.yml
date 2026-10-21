@@ -25,6 +25,7 @@ jobs:
         run: |
           for file in js/*.js; do node --check "$file"; done
           node --test tests/sync-regression.cjs
+          node --test tests/task-undo.cjs
       - name: Build clean publish directory
         run: node scripts/build-pages.cjs
       - uses: actions/configure-pages@v5

@@ -464,7 +464,7 @@ function completeTask(childId, taskId, points, desc) {
      rec 为 Object.create(null)，rec[taskId] = {...} 对 __proto__ 等特殊 ID 也安全创建自有属性。 */
   const rec = getTodayCheckins(childId);
   const hist = addPoints(childId, trustedPoints, desc || '打卡奖励');
-  rec[taskId] = { completed: true, time: Date.now(), points: trustedPoints, historyId: hist.id };
+  rec[taskId] = { completed: true, time: Math.max(Date.now(), ((rec[taskId] && Number(rec[taskId].time)) || 0) + 1), points: trustedPoints, historyId: hist.id };
   saveState(_state);
   return { success: true };
 }
@@ -474,7 +474,7 @@ function isTodayTs(ts) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` === todayStr();
 }
 
-/* 撤销当天普通任务打卡：删记录 + 按原发放积分扣回 + 负向流水，三步原子完成。
+/* 撤销当天普通任务打卡：保存未完成记录 + 按原发放积分扣回 + 负向流水，三步原子完成。
    应扣积分优先取打卡快照；旧记录无快照时，仅在当天流水可唯一匹配时回退；
    金额不确定或余额不足时不改动任何数据。 */
 function undoTask(childId, taskId, taskName) {
@@ -498,9 +498,9 @@ function undoTask(childId, taskId, taskName) {
   if (typeof cs.points !== 'number' || !isFinite(cs.points) || cs.points < amount) {
     return { success: false, reason: 'insufficient_for_revoke', amount };
   }
-  /* 全部校验通过，现在才修改状态。rec 为 Object.create(null)（新数据）或普通对象（旧数据），
-     delete 自有属性安全。 */
-  delete rec[taskId];
+  /* 保留带新时间的撤销状态，供云端 upsert，防止旧的已完成记录被重新拉回。
+     同一毫秒内打卡/撤销/重打卡仍须有严格递增的版本时间。 */
+  rec[taskId] = { ...entry, completed: false, time: Math.max(Date.now(), (Number(entry.time) || 0) + 1) };
   cs.points -= amount;
   cs.pointsHistory.unshift({ id: 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6), type: 'revoke', amount, desc: `撤销打卡：${taskName}`, time: Date.now() });
   saveState(_state);
@@ -566,7 +566,7 @@ function completeGradeGoal(childId, optionValue) {
   if (!_isValidPoints(points)) return { success: false, reason: 'invalid_points' };
   const label = optionValue === 'top3' ? '满分或前三' : '前五';
   const hist = addPoints(childId, points, '成绩目标：' + label);
-  rec['grade-goal'] = { option: optionValue, completed: true, time: Date.now(), points, historyId: hist.id };
+  rec['grade-goal'] = { option: optionValue, completed: true, time: Math.max(Date.now(), ((gg && Number(gg.time)) || 0) + 1), points, historyId: hist.id };
   saveState(_state);
   return { success: true, points, historyId: hist.id };
 }
@@ -593,7 +593,7 @@ function undoGradeGoal(childId) {
   if (typeof cs.points !== 'number' || !isFinite(cs.points) || cs.points < amount) {
     return { success: false, reason: 'insufficient_for_revoke', amount };
   }
-  delete rec['grade-goal'];
+  rec['grade-goal'] = { ...entry, completed: false, time: Math.max(Date.now(), (Number(entry.time) || 0) + 1) };
   cs.points -= amount;
   cs.pointsHistory.unshift({ id: 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6), type: 'revoke', amount, desc: '撤销成绩目标打卡', time: Date.now() });
   saveState(_state);
