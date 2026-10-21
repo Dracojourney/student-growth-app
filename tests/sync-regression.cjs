@@ -3,8 +3,8 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../js/sync.js'),'utf8');
 const clone=x=>JSON.parse(JSON.stringify(x));
-function setup({local,cloud={},cursor={},failTable,hangTable,authLock=false}={}){
- const tables={children:[],points_ledger:[],checkins:[],redemptions:[],child_task_config:[],family_reward_config:[],family_settings:[],...clone(cloud)};
+function setup({local,cloud={},cursor={},failTable,hangTable,authLock=false,restoreMode=false,failRestoreStorage=false}={}){
+ const tables={family_members:[{family_id:'family',user_id:'user'}],children:[],points_ledger:[],checkins:[],redemptions:[],child_task_config:[],family_reward_config:[],family_settings:[],...clone(cloud)};
  let activeHang=hangTable;
  let callback,inCallback=false;const writes=[];const signals=[];
  class Query{
@@ -25,10 +25,10 @@ function setup({local,cloud={},cursor={},failTable,hangTable,authLock=false}={})
   }).then(ok,bad);}
  }
  const storage=new Map([['sga_cloud_sync_state',JSON.stringify(cursor)]]);
- const client={from:t=>new Query(t),rpc:()=>authLock&&inCallback?new Promise(()=>{}):Promise.resolve({data:'family',error:null}),auth:{onAuthStateChange:fn=>{callback=fn},signOut:()=>Promise.resolve({}),signInWithPassword:()=>Promise.resolve({error:{message:'invalid credentials'}}),signUp:()=>Promise.resolve({error:{message:'invalid signup'}})}};
+ const client={from:t=>new Query(t),rpc:name=>{writes.push('rpc:'+name);return authLock&&inCallback?new Promise(()=>{}):Promise.resolve({data:'family',error:null})},auth:{onAuthStateChange:fn=>{callback=fn},signOut:()=>Promise.resolve({}),signInWithPassword:()=>Promise.resolve({error:{message:'invalid credentials'}}),signUp:()=>Promise.resolve({error:{message:'invalid signup'}})}};
  const state=clone(local||{childrenList:[],children:{}});
- const ctx={console,Date,Promise,AbortController,setTimeout:(fn,ms)=>ms<=30?setTimeout(fn,ms):1,clearTimeout,SGA_SUPABASE_URL:'https://test.invalid',SGA_SUPABASE_ANON_KEY:'public',
- localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
+ const ctx={console,Date,Promise,AbortController,location:{search:restoreMode?'?restore=cloud':''},setTimeout:(fn,ms)=>ms<=30?setTimeout(fn,ms):1,clearTimeout,SGA_SUPABASE_URL:'https://test.invalid',SGA_SUPABASE_ANON_KEY:'public',
+ localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>{if(failRestoreStorage&&k==='student_growth_app_v1')throw Error('test quota exceeded');storage.set(k,v)},removeItem:k=>storage.delete(k)},
  document:{addEventListener:()=>{}},getAppState:()=>state,saveState:()=>{},render:()=>{},
  deleteChild:id=>{state.childrenList=state.childrenList.filter(c=>c.id!==id);delete state.children[id];}};
  ctx.window=ctx;ctx.supabase={createClient:()=>client};ctx.addEventListener=()=>{};
@@ -69,6 +69,33 @@ test('profile uploads never overwrite ledger-derived cloud balance',async()=>{
 test('authentication errors reject instead of reporting login success',async()=>{
  const s=setup();await assert.rejects(s.sync.signIn('qa@example.com','wrong'),e=>e.message==='invalid credentials');
  await assert.rejects(s.sync.signUp('qa@example.com','wrong'),e=>e.message==='invalid signup');
+});
+
+test('cloud restoration waits for explicit action, backs up local state and never uploads',async()=>{
+ const old=child();old.points=999;old.pointsHistory=[{id:'unsynced',type:'bonus',amount:999,time:Date.now()}];
+ const s=setup({restoreMode:true,local:{childrenList:[profile],children:{kid:old}},cursor:{initialized:true,childIds:['kid']},cloud:{children:[{...row,points:17}],family_settings:[done],points_ledger:[{family_id:'family',child_id:'kid',client_id:'saved',type:'bonus',amount:17,occurred_at:'2026-10-21T17:18:00Z'}]}});
+ await s.login();assert.equal(s.state.children.kid.points,999);assert.equal(s.writes.length,0);
+ assert.equal(await s.sync.restoreCloudToLocal(),true);
+ assert.equal(s.state.children.kid.points,17);assert.equal(s.state.children.kid.pointsHistory.length,1);
+ const backup=JSON.parse(s.storage.get(s.sync.status().restoreBackupKey));assert.equal(backup.children.kid.points,999);
+ await s.sync.syncAll();await s.sync.pushNow();assert.equal(s.writes.length,0);assert.equal(s.sync.status().restoreComplete,true);
+});
+test('failed or empty cloud restore never replaces the local working copy',async()=>{
+ for(const hang of [null,'child_task_config']){
+  const local={childrenList:[profile],children:{kid:{...child(),points:23}}};
+  const s=setup({restoreMode:true,local,hangTable:hang,cloud:{children:hang?[row]:[],family_settings:[done]}});
+  await s.login();assert.equal(await s.sync.restoreCloudToLocal(),false);
+  assert.deepEqual(s.state,local);assert.equal(s.writes.length,0);assert.equal(s.sync.status().restoreComplete,false);
+ }
+});
+
+test('restore refuses missing membership and never reports success after quota failure',async()=>{
+ const local={childrenList:[profile],children:{kid:{...child(),points:23}}};
+ const missing=setup({restoreMode:true,local,cloud:{family_members:[]}});await missing.login();
+ assert.equal(missing.sync.status().familyId,null);assert.equal(missing.writes.length,0);assert.deepEqual(missing.state,local);
+ const quota=setup({restoreMode:true,failRestoreStorage:true,local,cloud:{children:[row],family_settings:[done]}});await quota.login();
+ assert.equal(await quota.sync.restoreCloudToLocal(),false);assert.equal(quota.sync.status().restoreComplete,false);
+ assert.deepEqual(quota.state,local);assert.equal(quota.writes.length,0);assert.match(quota.sync.status().lastError,/quota/);
 });
 
 test('custom task undo survives pull-before-push and reaches another device without duplicate deductions',async()=>{

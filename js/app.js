@@ -16,9 +16,42 @@ function navigate(page) {
 navItems.forEach(n => n.addEventListener('click', () => navigate(n.dataset.page)));
 
 function render() {
+  if (typeof SGASync !== 'undefined' && SGASync.status().restoreMode) { renderCloudRestore(); return; }
   if (currentPage === 'checkin') renderCheckin();
   else if (currentPage === 'rewards') renderRewards();
   else if (currentPage === 'parent') renderParent();
+}
+
+function renderCloudRestore() {
+  const status = SGASync.status();
+  navItems.forEach(item => { item.hidden = true; });
+  pageContent.innerHTML = '<section class="tm-form" style="padding:24px"><h2>从云端恢复本机数据</h2>' +
+    '<p>只读取当前账号的云端数据。恢复前保存本机备份，不向云端上传本机改动。</p>' +
+    '<p id="restore-message" role="status"></p><div id="restore-actions" class="sheet-actions"></div></section>';
+  const message = document.getElementById('restore-message');
+  const actions = document.getElementById('restore-actions');
+  message.textContent = status.lastError || (status.restoreComplete ? '云端数据已恢复到本机。请核对孩子、任务和积分后继续使用。' :
+    status.signedIn ? '已登录：' + status.email + '。等待你确认恢复。' : '请先登录保存原有家庭数据的账号。');
+  const button = document.createElement('button');
+  button.className = 'btn btn-primary';
+  button.textContent = status.restoreComplete ? '核对恢复的数据' : status.signedIn ? '恢复云端数据到本机' : '登录云端账号';
+  button.disabled = status.syncing;
+  button.addEventListener('click', () => {
+    const proceed = () => {
+      if (status.restoreComplete) {
+        const url = new URL(location.href); url.searchParams.delete('restore'); location.assign(url.href); return;
+      }
+      if (!status.signedIn) { openSyncSheet(); return; }
+      showSheet('<div class="sheet-title">确认从云端恢复</div><div class="sheet-body">将用当前云端数据替换本机工作副本。本机现有数据会先备份，云端不会被修改。</div><div class="sheet-actions"><button class="btn btn-secondary" id="cancel-cloud-restore">取消</button><button class="btn btn-primary" id="confirm-cloud-restore">确认恢复</button></div>');
+      document.getElementById('cancel-cloud-restore').onclick = closeModal;
+      document.getElementById('confirm-cloud-restore').onclick = async () => {
+        closeModal(); button.disabled = true; message.textContent = '正在备份本机并读取云端，请稍候…';
+        await SGASync.restoreCloudToLocal(); render();
+      };
+    };
+    if (isParentVerified()) proceed(); else showParentPinModal('恢复数据需要家长验证', proceed);
+  });
+  actions.appendChild(button);
 }
 
 /* ---------- 内联 SVG 图标 ---------- */
@@ -1974,4 +2007,5 @@ function formatTime(ts) {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+if (typeof SGASync !== 'undefined') SGASync.onChange(() => { if (SGASync.status().restoreMode) render(); });
 render();

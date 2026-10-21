@@ -20,6 +20,8 @@ var SGASync = (function () {
   'use strict';
 
   var REQUEST_TIMEOUT_MS = 15000;
+  var _restoreMode = typeof location !== 'undefined' && /(?:\?|&)restore=cloud(?:&|$)/.test(location.search || '');
+  var _restoreRequested = false, _restoreComplete = false, _restoreBackupKey = '', _restorePending = null;
 
   function withDeadline(start, controller) {
     return new Promise(function (resolve, reject) {
@@ -53,6 +55,13 @@ var SGASync = (function () {
     }
     function cleanup() { if (upstream) upstream.removeEventListener('abort', abort); }
     return withDeadline(function () {
+      // Keep the Supabase client URL/session identity; change only the network destination.
+      var original = typeof input === 'string' ? input : (input && input.url);
+      if (typeof SGA_SUPABASE_GATEWAY === 'string' && SGA_SUPABASE_GATEWAY &&
+          original && original.indexOf(SGA_SUPABASE_URL + '/') === 0) {
+        var destination = SGA_SUPABASE_GATEWAY + original.slice(SGA_SUPABASE_URL.length);
+        input = typeof input === 'string' ? destination : new Request(destination, input);
+      }
       return fetch(input, Object.assign({}, options, { signal: controller.signal }));
     }, controller).then(function (response) { cleanup(); return response; },
       function (error) { cleanup(); throw error; });
@@ -109,7 +118,8 @@ var SGASync = (function () {
       familyId: _familyId,
       syncing: _pulling || _pushing,
       lastError: _lastError,
-      lastSyncAt: _lastSyncAt
+      lastSyncAt: _lastSyncAt,
+      restoreMode: _restoreMode, restoreComplete: _restoreComplete, restoreBackupKey: _restoreBackupKey
     };
   }
   function onChange(fn) { _listeners.push(fn); }
@@ -263,6 +273,7 @@ var SGASync = (function () {
 
   /* ---------- 推送（增量：流水/打卡/兑换按时间游标，配置按内容哈希门控）---------- */
   function pushNow() {
+    if (_restoreMode) return Promise.resolve(false); /* Recovery must never write business data upstream. */
     if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
     /* 重入守卫改为"合并到同一个 Promise"而不是拒绝：
        syncAll → pullAndMerge 正在跑（几百毫秒）期间，后台 schedulePush 的 2s
@@ -427,6 +438,7 @@ var SGASync = (function () {
   }
 
   function schedulePush() {
+    if (_restoreMode) return;
     if (!_user || !_familyId || _initializing) return;
     if (_pushTimer) clearTimeout(_pushTimer);
     _pushTimer = setTimeout(function () { _pushTimer = 0; syncAll(); }, 2000);
@@ -600,11 +612,17 @@ var SGASync = (function () {
   }
 
   function pullAndMerge() {
+    if (_restoreMode && !_restoreRequested) return Promise.resolve(false);
     if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
     if (_pulling) return _pendingPull; /* 合并到同一个 pending Pull */
     if (_pushing) return _pendingPush.then(function () { return _lastError ? false : pullAndMerge(); });
     var st = (typeof getAppState === 'function') ? getAppState() : null;
     if (!st) { _lastError = '本地状态不可用'; _notify(); return Promise.resolve(false); }
+    var workingState = st;
+    if (_restoreMode) {
+      st = JSON.parse(JSON.stringify(st));
+      st.rewardConfig = { overrides: {}, custom: [] };
+    }
     _pulling = true; _lastError = ''; _notify();
     var fid = _familyId;
     var changedAny = false;
@@ -625,6 +643,7 @@ var SGASync = (function () {
         return readRows('children').then(function (r1) {
           if (r1.error) throw r1.error;
           var cloudKids = r1.data || [];
+          if (_restoreMode && !cloudKids.length) throw new Error('云端没有孩子数据，已停止恢复，本机数据未更改');
           var cloudIds = {};
           cloudKids.forEach(function (ck) { cloudIds[ck.child_id] = 1; });
 
@@ -765,6 +784,11 @@ var SGASync = (function () {
         });
       })
       .then(function () {
+        if (_restoreMode) {
+          var restoredData = JSON.stringify(st);
+          localStorage.setItem(BIZ_KEY, restoredData);
+          if (localStorage.getItem(BIZ_KEY) !== restoredData) throw new Error('恢复数据未能保存到本机，已停止恢复');
+        }
         /* 加入家庭首拉完成：清除 adopt 标记，本设备恢复正常推送。
            失败路径保留标记，下次拉取继续以云端为准，期间推送保持禁止 */
         if (syncSt.adoptCloudOnce === fid) {
@@ -778,6 +802,11 @@ var SGASync = (function () {
           _saveLocal(syncSt);
         }
         if (changedAny) {
+          if (_restoreMode) {
+            Object.keys(workingState).forEach(function (key) { delete workingState[key]; });
+            Object.keys(st).forEach(function (key) { workingState[key] = st[key]; });
+            st = workingState;
+          }
           /* Register cloud-only children so their normal task buttons work immediately. */
           if (typeof registerChildBuiltinTasks === 'function' && typeof getBuiltinTasks === 'function') {
             st.childrenList.forEach(function (c) {
@@ -801,6 +830,7 @@ var SGASync = (function () {
   }
 
   function syncAll() {
+    if (_restoreMode) return Promise.resolve(_restoreComplete);
     if (!_user) { _lastError = '请先登录'; _notify(); return Promise.resolve(false); }
     if (_initializing && _initializationPromise) return _initializationPromise;
     if (!_familyId) return initializeFamily();
@@ -810,6 +840,34 @@ var SGASync = (function () {
     });
   }
 
+  function restoreCloudToLocal() {
+    if (!_restoreMode) return Promise.resolve(false);
+    if (_restorePending) return _restorePending;
+    if (!_user || !_familyId || _initializing) { _lastError = '请先登录并等待账号准备完成'; _notify(); return Promise.resolve(false); }
+    var previousCursor = _loadLocal();
+    try {
+      if (!_restoreBackupKey) {
+        var raw = JSON.stringify(getAppState());
+        var backupKey = BIZ_KEY + '_before_cloud_restore_' + Date.now();
+        localStorage.setItem(backupKey, raw);
+        if (localStorage.getItem(backupKey) !== raw) throw new Error('本机备份保存失败，已停止恢复');
+        _restoreBackupKey = backupKey;
+      }
+      var cursor = _loadLocal(); cursor.adoptCloudOnce = _familyId;
+      localStorage.setItem(SYNC_KEY, JSON.stringify(cursor));
+    } catch (error) { _lastError = String(error.message || error); _notify(); return Promise.resolve(false); }
+    _restoreRequested = true; _restoreComplete = false;
+    _restorePending = pullAndMerge().then(function () {
+      _restoreComplete = !_lastError;
+      if (!_restoreComplete) _saveLocal(previousCursor);
+      return _restoreComplete;
+    }).finally(function () {
+      _restoreRequested = false; _restorePending = null; _notify();
+      if (typeof render === 'function') render();
+    });
+    return _restorePending;
+  }
+
   /* Leave the SDK auth callback before a query can acquire its session lock. */
   function initializeFamily() {
     if (_initializing && _initializationPromise) return _initializationPromise;
@@ -817,13 +875,21 @@ var SGASync = (function () {
     var userId = _user.id;
     _initializing = true; _familyUserId = userId; _lastError = '';
     var pending = new Promise(function (resolve) { setTimeout(resolve, 0); })
-      .then(function () { return ensureFamily(); })
+      .then(function () {
+        if (!_restoreMode) return ensureFamily();
+        return request(client.from('family_members').select('family_id').eq('user_id', userId).maybeSingle()).then(function (result) {
+          if (result.error) throw result.error;
+          if (!result.data || !result.data.family_id) throw new Error('此账号没有现有云端家庭，请核对登录账号');
+          return result.data.family_id;
+        });
+      })
       .then(function (fid) {
         if (!_user || _user.id !== userId) throw new Error('登录状态已变化，请重试');
+        if (_restoreMode) { _familyId = fid; return false; }
         bindFamily(fid); _familyId = fid;
         return pullAndMerge();
       }).then(function () {
-        return _lastError ? false : pushNow();
+        return _restoreMode ? !_lastError : (_lastError ? false : pushNow());
       }).catch(function (error) {
         if (_user && _user.id === userId) _lastError = String((error && error.message) || error);
         return false;
@@ -893,6 +959,7 @@ var SGASync = (function () {
     pushNow: pushNow,
     pullAndMerge: pullAndMerge,
     syncAll: syncAll,
+    restoreCloudToLocal: restoreCloudToLocal,
     getFamilyInfo: getFamilyInfo,
     regenerateInviteCode: regenerateInviteCode,
     joinFamily: joinFamily
