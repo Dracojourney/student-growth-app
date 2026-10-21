@@ -584,10 +584,18 @@ var SGASync = (function () {
           });
 
           return Promise.all(jobs).then(function () {
-            /* 迁移已完成时，云端缺失的孩子视为已在其他设备删除 */
+            /* 迁移已完成时，云端缺失的孩子视为已在其他设备删除。
+               但只删除"上次已推送过"的孩子：本地新建尚未推送的孩子
+               （不在 childIds 里）不能当作他人删除，否则 syncAll 先拉后推
+               时，刚建好的孩子会被自己的拉取删掉（E2E 已复现该数据丢失）。 */
             if (done && Array.isArray(st.childrenList)) {
-              var toDelete = st.childrenList.filter(function (c) { return !cloudIds[c.id]; })
-                .map(function (c) { return c.id; });
+              var knownIds = Array.isArray(syncSt.childIds) ? syncSt.childIds : [];
+              var known = {};
+              knownIds.forEach(function (kid) { known[kid] = 1; });
+              var toDelete = st.childrenList.filter(function (c) {
+                if (cloudIds[c.id]) return false;
+                return known[c.id] === 1;
+              }).map(function (c) { return c.id; });
               if (toDelete.length && typeof deleteChild === 'function') {
                 toDelete.forEach(function (cid) { deleteChild(cid); });
                 changedAny = true;
