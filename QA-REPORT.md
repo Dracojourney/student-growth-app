@@ -48,3 +48,11 @@ GitHub Actions 工作流：.github/workflows/pages.yml。每次推送 main，先
 Playwright 脚本导出接收 page 的异步函数；云端脚本使用测试页内临时 __qa 凭据，文件中不保存账号密码。请始终使用独立测试家庭运行云端脚本。
 
 参考：[GitHub Pages 自定义工作流](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)、[Supabase 分页](https://supabase.com/docs/reference/javascript/using-modifiers-range)。
+
+## 2026-10-21 退出弹窗与同步卡住修复
+
+修复了退出验证引用不存在样式导致透明重叠的问题，补齐遮罩、卡片、取消、滚动锁和安全区。认证回调延后发起云查询，所有数据库请求添加15秒取消超时；超时释放同步状态，手动同步的异常处理和按钮恢复补齐。退出仅作用于当前设备。
+
+本轮10项Node回归测试通过（包含认证锁、挂起请求、取消、恢复重试），Playwright12项网络挂起和真实退出操作专项检查通过，另验证错误/正确PIN、取消、手机高度适配和意外异常后按钮恢复。独立真实Supabase账号完成初始化、积分记录上传核对和重复同步；这些验证没有登录或检查用户截图中的账号数据。
+
+参考：[Supabase认证回调阻塞说明](https://supabase.com/docs/guides/troubleshooting/why-is-my-supabase-api-call-not-returning-PGzXw0)。

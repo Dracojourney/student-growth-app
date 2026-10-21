@@ -19,13 +19,52 @@
 var SGASync = (function () {
   'use strict';
 
+  var REQUEST_TIMEOUT_MS = 15000;
+
+  function withDeadline(start, controller) {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        controller.abort();
+        finish(reject, new Error('云同步请求超时，请检查网络后点击立即同步重试'));
+      }, REQUEST_TIMEOUT_MS);
+      function finish(done, value) {
+        if (settled) return;
+        settled = true; clearTimeout(timer); done(value);
+      }
+      try {
+        Promise.resolve(start()).then(function (value) { finish(resolve, value); },
+          function (error) { finish(reject, error); });
+      } catch (error) { finish(reject, error); }
+    });
+  }
+  function request(query) {
+    var controller = new AbortController();
+    if (query && typeof query.abortSignal === 'function') query = query.abortSignal(controller.signal);
+    return withDeadline(function () { return query; }, controller);
+  }
+  function fetchWithTimeout(input, options) {
+    options = options || {};
+    var controller = new AbortController(), upstream = options.signal || (input && input.signal);
+    var abort = function () { controller.abort(); };
+    if (upstream) {
+      if (upstream.aborted) controller.abort();
+      else upstream.addEventListener('abort', abort, { once: true });
+    }
+    function cleanup() { if (upstream) upstream.removeEventListener('abort', abort); }
+    return withDeadline(function () {
+      return fetch(input, Object.assign({}, options, { signal: controller.signal }));
+    }, controller).then(function (response) { cleanup(); return response; },
+      function (error) { cleanup(); throw error; });
+  }
+
   var client = null;
   try {
     if (typeof SGA_SUPABASE_URL === 'string' && SGA_SUPABASE_URL &&
         typeof SGA_SUPABASE_ANON_KEY === 'string' && SGA_SUPABASE_ANON_KEY &&
         typeof window.supabase !== 'undefined' && window.supabase &&
         typeof window.supabase.createClient === 'function') {
-      client = window.supabase.createClient(SGA_SUPABASE_URL, SGA_SUPABASE_ANON_KEY);
+      client = window.supabase.createClient(SGA_SUPABASE_URL, SGA_SUPABASE_ANON_KEY, { global: { fetch: fetchWithTimeout } });
     }
   } catch (e) { client = null; }
 
@@ -51,6 +90,7 @@ var SGASync = (function () {
   var _listeners = [];
   var _pushTimer = 0;
   var _initializing = false;
+  var _initializationPromise = null;
   var _familyUserId = null; /* 当前 _familyId 归属的用户 id，用于识别重复 auth 事件 */
 
   function _loadLocal() {
@@ -108,7 +148,7 @@ var SGASync = (function () {
   }
   function signOut() {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
-    return Promise.all([_pendingPull, _pendingPush]).then(function () { return client.auth.signOut(); }).then(authResult);
+    return Promise.all([_initializationPromise, _pendingPull, _pendingPush]).then(function () { return client.auth.signOut({ scope: 'local' }); }).then(authResult);
   }
   /* 重发邮箱确认邮件（当前项目已关闭邮箱确认，此接口为防御性保留，
      将来若重新开启验证时可直接调用，无需改 sync.js 结构） */
@@ -121,7 +161,7 @@ var SGASync = (function () {
      使用 0003 迁移的 ensure_my_family() RPC：advisory lock 原子化，
      避免多标签页/多设备同时首登时重复建家（前端两步查+建有竞态）。 */
   function ensureFamily() {
-    return client.rpc('ensure_my_family').then(function (res) {
+    return request(client.rpc('ensure_my_family')).then(function (res) {
       if (res.error) throw res.error;
       return res.data;
     });
@@ -139,9 +179,9 @@ var SGASync = (function () {
   function getFamilyInfo() {
     if (!_user || !_familyId) return Promise.resolve(null);
     return Promise.all([
-      client.from('families').select('id,owner_id,invite_code').eq('id', _familyId).maybeSingle(),
-      client.from('family_members').select('user_id,email,joined_at').eq('family_id', _familyId)
-        .order('joined_at', { ascending: true })
+      request(client.from('families').select('id,owner_id,invite_code').eq('id', _familyId).maybeSingle()),
+      request(client.from('family_members').select('user_id,email,joined_at').eq('family_id', _familyId)
+        .order('joined_at', { ascending: true }))
     ]).then(function (rs) {
       if (rs[0].error) throw rs[0].error;
       if (rs[1].error) throw rs[1].error;
@@ -160,7 +200,7 @@ var SGASync = (function () {
 
   function regenerateInviteCode() {
     if (!_user) return Promise.reject(new Error('请先登录'));
-    return client.rpc('regenerate_my_invite_code').then(function (res) {
+    return request(client.rpc('regenerate_my_invite_code')).then(function (res) {
       if (res.error) throw res.error;
       return res.data;
     });
@@ -172,7 +212,7 @@ var SGASync = (function () {
     if (!/^[A-Z0-9]{6}$/.test(c)) return Promise.reject(new Error('请输入 6 位邀请码'));
     if (_pushTimer) { clearTimeout(_pushTimer); _pushTimer = 0; }
     return Promise.all([_pendingPull, _pendingPush]).then(function () {
-      return client.rpc('join_family_by_code', { p_code: c });
+      return request(client.rpc('join_family_by_code', { p_code: c }));
     }).then(function (res) {
       if (res.error) throw res.error;
       var fid = res.data;
@@ -277,7 +317,7 @@ var SGASync = (function () {
       : Promise.resolve({ error: null });
 
     /* 把整条 push 链存进 _pendingPush，让后续重入调用能等到同一个 Promise 完成 */
-    var chain = delJob.then(function (r) { if (r.error) throw r.error; return childrenJob; })
+    var chain = request(delJob).then(function (r) { if (r.error) throw r.error; return request(childrenJob); })
       .then(function (r) {
         if (r.error) throw r.error;
         var jobs = [];
@@ -355,9 +395,9 @@ var SGASync = (function () {
         /* 首次全量上传完成标记（拉取侧据此执行"云端缺失=已删除"规则） */
         /* Mark migration complete only after every business write succeeds. */
         return Promise.all(jobs.map(function (j) {
-          return j.then(function (r) { if (r && r.error) throw r.error; });
+          return request(j).then(function (r) { if (r && r.error) throw r.error; });
         })).then(function () {
-          return client.from('family_settings').upsert({ family_id: fid, migration_state: { status: 'done' } });
+          return request(client.from('family_settings').upsert({ family_id: fid, migration_state: { status: 'done' } }));
         }).then(function (r) { if (r.error) throw r.error; return cfgMetaUpdates; });
       })
       .then(function (metaUpdates) {
@@ -413,7 +453,7 @@ var SGASync = (function () {
       if (cid != null) query = query.eq('child_id', cid);
       if (table === 'checkins') query = query.order('day').order('task_id');
       else query = query.order(table === 'children' ? 'child_id' : 'client_id');
-      return query.range(offset, offset + size - 1).then(function (r) {
+      return request(query.range(offset, offset + size - 1)).then(function (r) {
         if (r.error) throw r.error;
         var page = r.data || [];
         rows = rows.concat(page);
@@ -432,7 +472,7 @@ var SGASync = (function () {
       readRows('points_ledger', cid),
       readRows('checkins', cid),
       readRows('redemptions', cid),
-      client.from('child_task_config').select('data,updated_at').eq('family_id', _familyId).eq('child_id', cid).maybeSingle()
+      request(client.from('child_task_config').select('data,updated_at').eq('family_id', _familyId).eq('child_id', cid).maybeSingle())
     ]).then(function (rs) {
       if (rs[0].error) throw rs[0].error;
       if (rs[1].error) throw rs[1].error;
@@ -485,7 +525,7 @@ var SGASync = (function () {
       readRows('points_ledger', cid),
       readRows('checkins', cid),
       readRows('redemptions', cid),
-      client.from('child_task_config').select('data,updated_at').eq('family_id', _familyId).eq('child_id', cid).maybeSingle()
+      request(client.from('child_task_config').select('data,updated_at').eq('family_id', _familyId).eq('child_id', cid).maybeSingle())
     ]).then(function (rs) {
       if (rs[0].error) throw rs[0].error;
       if (rs[1].error) throw rs[1].error;
@@ -578,7 +618,7 @@ var SGASync = (function () {
        覆盖云端。云端为空则走既有迁移路径（首台设备上传本地数据）。 */
     var bootAdopt = !adoptFid && !syncSt.initialized;
 
-    var chain = client.from('family_settings').select('migration_state').eq('family_id', fid).maybeSingle()
+    var chain = request(client.from('family_settings').select('migration_state').eq('family_id', fid).maybeSingle())
       .then(function (r0) {
         if (r0.error) throw r0.error;
         var done = !!(r0.data && r0.data.migration_state && r0.data.migration_state.status === 'done');
@@ -695,7 +735,7 @@ var SGASync = (function () {
             }
             /* 家庭共享奖励配置：本地缺失 → 取云端；
                云端更新且本地自上次同步后未改 → 采纳云端 */
-            return client.from('family_reward_config').select('data,updated_at').eq('family_id', fid).maybeSingle()
+            return request(client.from('family_reward_config').select('data,updated_at').eq('family_id', fid).maybeSingle())
               .then(function (r2) {
                 if (r2.error) throw r2.error;
                 var row = r2.data;
@@ -761,11 +801,40 @@ var SGASync = (function () {
   }
 
   function syncAll() {
-    if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
+    if (!_user) { _lastError = '请先登录'; _notify(); return Promise.resolve(false); }
+    if (_initializing && _initializationPromise) return _initializationPromise;
+    if (!_familyId) return initializeFamily();
     return pullAndMerge().then(function () {
       /* 拉取失败（_lastError 非空）时不推送，防止本机旧数据覆盖云端 */
       return _lastError ? false : pushNow();
     });
+  }
+
+  /* Leave the SDK auth callback before a query can acquire its session lock. */
+  function initializeFamily() {
+    if (_initializing && _initializationPromise) return _initializationPromise;
+    if (!_user) return Promise.resolve(false);
+    var userId = _user.id;
+    _initializing = true; _familyUserId = userId; _lastError = '';
+    var pending = new Promise(function (resolve) { setTimeout(resolve, 0); })
+      .then(function () { return ensureFamily(); })
+      .then(function (fid) {
+        if (!_user || _user.id !== userId) throw new Error('登录状态已变化，请重试');
+        bindFamily(fid); _familyId = fid;
+        return pullAndMerge();
+      }).then(function () {
+        return _lastError ? false : pushNow();
+      }).catch(function (error) {
+        if (_user && _user.id === userId) _lastError = String((error && error.message) || error);
+        return false;
+      }).then(function (ok) {
+        if (_initializationPromise === pending) {
+          _initializing = false; _initializationPromise = null; _notify();
+        }
+        return ok;
+      });
+    _initializationPromise = pending;
+    return pending;
   }
 
   /* ---------- 事件接线 ---------- */
@@ -783,25 +852,7 @@ var SGASync = (function () {
          （多设备同步失效的第二个根因，已在 E2E 中实际复现） */
       if (_familyId && _familyUserId === _user.id) return;
       if (_initializing) { _familyUserId = _user.id; return; }
-      _initializing = true;
-      _familyUserId = _user.id;
-      _lastError = '';
-      ensureFamily().then(function (fid) {
-        bindFamily(fid);
-        _familyId = fid;
-        return pullAndMerge();
-      }).then(function () {
-        /* 登录后立即推送一次：首登把本地数据迁移上云；后续登录为空增量，幂等。
-           首拉失败（_lastError 非空）时不推送，防止本机旧数据覆盖云端 */
-        return _lastError ? null : pushNow();
-      }).then(function () {
-        _initializing = false;
-        _notify();
-      }).catch(function (err) {
-        _initializing = false;
-        _lastError = String((err && err.message) || err);
-        _notify();
-      });
+      initializeFamily();
     });
     /* 每次本地保存 → 防抖推送 */
     if (typeof window.saveState === 'function') {

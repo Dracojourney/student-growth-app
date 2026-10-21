@@ -5,6 +5,7 @@ const navItems = document.querySelectorAll('.nav-item');
 
 let currentPage = 'checkin';
 let currentCategory = '全部';
+let pinModalScrollY = null;
 
 function navigate(page) {
   currentPage = page;
@@ -1166,6 +1167,11 @@ function openSyncSheet() {
           syncBtn.textContent = '立即同步';
           showToast('同步失败：' + (SGASync.status().lastError || '未知错误'));
         }
+      }).catch(err => {
+        showToast('同步失败：' + ((err && err.message) || '请稍后重试'));
+      }).finally(() => {
+        syncBtn.disabled = false;
+        syncBtn.textContent = '立即同步';
       });
     });
     actions.appendChild(syncBtn);
@@ -1206,11 +1212,11 @@ function renderParentGate() {
 /* 家长 PIN 弹窗：用于保护退出登录等敏感操作，防止孩子误操作 */
 function showParentPinModal(title, onSuccess) {
   const sheet = document.createElement('div');
-  sheet.className = 'tm-modal';
-  sheet.innerHTML = `<div class="tm-modal-card" style="width:300px;">
+  sheet.className = 'modal-mask pin-mask';
+  sheet.innerHTML = `<div class="modal-sheet is-card pin-card" role="dialog" aria-modal="true" aria-labelledby="pin-modal-title">
     <div class="parent-gate" style="padding:20px 0;">
       <div class="gate-lock">${SVG.lock}</div>
-      <div class="gate-title">${title}</div>
+      <div class="gate-title" id="pin-modal-title">${escapeHTML(title)}</div>
       <div class="gate-sub">请输入 4 位家长密码</div>
       <div class="gate-dots">${[0,1,2,3].map(() => '<div class="gate-dot"></div>').join('')}</div>
       <div class="gate-pad">
@@ -1220,11 +1226,18 @@ function showParentPinModal(title, onSuccess) {
         <button class="gate-key" data-key="del" type="button" style="font-size:16px;">⌫</button>
       </div>
     </div>
+    <button class="btn btn-secondary pin-cancel" type="button">取消</button>
   </div>`;
+  pinModalScrollY = window.scrollY;
+  document.body.style.top = '-' + pinModalScrollY + 'px';
+  document.body.classList.add('pin-modal-open');
+  sheet.querySelector('.pin-cancel').addEventListener('click', closeModal);
+  sheet.addEventListener('click', event => { if (event.target === sheet) closeModal(); });
   modalRoot.hidden = false;
   modalRoot.innerHTML = '';
   modalRoot.classList.add('is-centered');
   modalRoot.appendChild(sheet);
+  sheet.querySelector('.gate-key').focus({ preventScroll: true });
   let code = '';
   const dots = sheet.querySelectorAll('.gate-dot');
   const updateDots = () => dots.forEach((d, i) => d.classList.toggle('is-filled', i < code.length));
@@ -1921,7 +1934,15 @@ function showSheet(content) {
   modalRoot.innerHTML = `<div class="modal-mask" id="modal-mask"></div><div class="modal-sheet" role="dialog">${content}</div>`;
   document.getElementById('modal-mask').addEventListener('click', closeModal);
 }
-function closeModal() { modalRoot.hidden = true; modalRoot.innerHTML = ''; modalRoot.classList.remove('is-centered'); }
+function closeModal() {
+  modalRoot.hidden = true; modalRoot.innerHTML = ''; modalRoot.classList.remove('is-centered');
+  if (pinModalScrollY !== null) {
+    const scrollY = pinModalScrollY; pinModalScrollY = null;
+    document.body.classList.remove('pin-modal-open');
+    document.body.style.removeProperty('top');
+    window.scrollTo(0, scrollY);
+  }
+}
 function showToast(msg) {
   const t = document.createElement('div');
   t.className = 'toast'; t.textContent = msg;

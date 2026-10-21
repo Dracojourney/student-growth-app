@@ -550,3 +550,17 @@ img { display: block; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
+
+/* PIN dialog: opaque card, full backdrop, safe area and background scroll lock. */
+body.pin-modal-open { position: fixed; left: 0; right: 0; overflow: hidden; }
+.pin-mask { display: flex; align-items: center; justify-content: center; padding: 16px; }
+.pin-mask .pin-card {
+  width: min(340px, 100%); margin: 0; padding: 20px 18px;
+  max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  overflow-y: auto; overscroll-behavior: contain;
+}
+.pin-card .parent-gate { padding: 0 !important; }
+.pin-card .gate-lock { margin-bottom: 8px; }
+.pin-card .gate-title { font-size: 20px; }
+.pin-card .gate-key { min-height: 44px; padding: 10px; }
+.pin-card .pin-cancel { width: 100%; flex-shrink: 0; margin-top: 16px; padding: 12px; border-radius: var(--radius-pill); }

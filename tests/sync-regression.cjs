@@ -3,15 +3,18 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../js/sync.js'),'utf8');
 const clone=x=>JSON.parse(JSON.stringify(x));
-function setup({local,cloud={},cursor={},failTable}={}){
+function setup({local,cloud={},cursor={},failTable,hangTable,authLock=false}={}){
  const tables={children:[],points_ledger:[],checkins:[],redemptions:[],child_task_config:[],family_reward_config:[],family_settings:[],...clone(cloud)};
- let callback;const writes=[];
+ let activeHang=hangTable;
+ let callback,inCallback=false;const writes=[];const signals=[];
  class Query{
   constructor(table){this.table=table;this.filters=[];this.op='select';this.offset=0;this.size=1000;}
+  abortSignal(signal){this.signal=signal;signals.push(signal);return this;}
   select(){return this;}eq(k,v){this.filters.push(r=>r[k]===v);return this;}in(k,vs){this.filters.push(r=>vs.includes(r[k]));return this;}
   order(){return this;}range(a,b){this.offset=a;this.size=b-a+1;return this;}maybeSingle(){this.single=true;return this;}
   upsert(rows){this.op='upsert';this.rows=Array.isArray(rows)?rows:[rows];return this;}delete(){this.op='delete';return this;}
   then(ok,bad){return Promise.resolve().then(()=>{
+   if(this.table===activeHang)return new Promise(()=>{});
    if(this.table===failTable&&this.op!=='select')return {error:{message:'test write failure'}};
    let rows=tables[this.table]||[];const matches=r=>this.filters.every(f=>f(r));
    if(this.op==='select'){const selected=rows.filter(matches).slice(this.offset,this.offset+this.size);return {data:this.single?(selected[0]||null):clone(selected),error:null};}
@@ -22,15 +25,15 @@ function setup({local,cloud={},cursor={},failTable}={}){
   }).then(ok,bad);}
  }
  const storage=new Map([['sga_cloud_sync_state',JSON.stringify(cursor)]]);
- const client={from:t=>new Query(t),rpc:()=>Promise.resolve({data:'family',error:null}),auth:{onAuthStateChange:fn=>{callback=fn},signOut:()=>Promise.resolve({}),signInWithPassword:()=>Promise.resolve({error:{message:'invalid credentials'}}),signUp:()=>Promise.resolve({error:{message:'invalid signup'}})}};
+ const client={from:t=>new Query(t),rpc:()=>authLock&&inCallback?new Promise(()=>{}):Promise.resolve({data:'family',error:null}),auth:{onAuthStateChange:fn=>{callback=fn},signOut:()=>Promise.resolve({}),signInWithPassword:()=>Promise.resolve({error:{message:'invalid credentials'}}),signUp:()=>Promise.resolve({error:{message:'invalid signup'}})}};
  const state=clone(local||{childrenList:[],children:{}});
- const ctx={console,Date,Promise,setTimeout:()=>1,clearTimeout:()=>{},SGA_SUPABASE_URL:'https://test.invalid',SGA_SUPABASE_ANON_KEY:'public',
+ const ctx={console,Date,Promise,AbortController,setTimeout:(fn,ms)=>ms<=30?setTimeout(fn,ms):1,clearTimeout,SGA_SUPABASE_URL:'https://test.invalid',SGA_SUPABASE_ANON_KEY:'public',
  localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
  document:{addEventListener:()=>{}},getAppState:()=>state,saveState:()=>{},render:()=>{},
  deleteChild:id=>{state.childrenList=state.childrenList.filter(c=>c.id!==id);delete state.children[id];}};
  ctx.window=ctx;ctx.supabase={createClient:()=>client};ctx.addEventListener=()=>{};
- vm.createContext(ctx);vm.runInContext(source,ctx);
- return {state,tables,writes,sync:ctx.SGASync,storage,login:async()=>{callback('SIGNED_IN',{user:{id:'user',email:'qa@example.com'}});for(let i=0;i<35;i++)await new Promise(r=>setImmediate(r));}};
+ vm.createContext(ctx);vm.runInContext(source.replace('var REQUEST_TIMEOUT_MS = 15000;', 'var REQUEST_TIMEOUT_MS = 25;'),ctx);
+ return {state,tables,writes,signals,setHang:table=>{activeHang=table},sync:ctx.SGASync,storage,login:async()=>{inCallback=true;callback('SIGNED_IN',{user:{id:'user',email:'qa@example.com'}});inCallback=false;await new Promise(r=>setTimeout(r,5));for(let i=0;i<35;i++)await new Promise(r=>setImmediate(r));}};
 }
 const profile={id:'kid',name:'测试孩子',gender:'',grade:'',avatar:'',banner:''};
 const child=()=>({points:0,pointsHistory:[],checkins:{},redemptions:[],taskConfig:{overrides:{},custom:[]}});
@@ -70,4 +73,20 @@ test('authentication errors reject instead of reporting login success',async()=>
 test('switching families never uploads the previous family state',async()=>{
  const s=setup({local:{childrenList:[profile],children:{kid:child()}},cursor:{initialized:true,familyId:'other-family',childIds:['kid']}});
  await s.login();assert.equal(s.state.childrenList.length,0);assert.equal(s.tables.children.length,0);
+});
+
+test('auth initialization does not run Supabase queries inside auth callback',async()=>{
+ const s=setup({authLock:true});await s.login();
+ assert.equal(s.sync.status().familyId,'family');
+});
+test('hanging cloud request releases syncing state and reports a retryable timeout',async()=>{
+ const s=setup({local:{childrenList:[profile],children:{kid:child()}},cursor:{initialized:true},hangTable:'family_settings'});
+ await s.login();
+ const result=await Promise.race([s.sync.syncAll(),new Promise(r=>setTimeout(()=>r('never-settled'),150))]);
+ assert.equal(result,false);
+ assert.equal(s.sync.status().syncing,false);
+ assert.match(s.sync.status().lastError,/超时/);
+ assert.ok(s.signals.some(signal=>signal.aborted),'the hung request must be cancelled');
+ assert.equal(s.tables.points_ledger.length,0,'failed pull must never lead to upload');
+ s.setHang(null);assert.equal(await s.sync.syncAll(),true,'retry after timeout must succeed');
 });
