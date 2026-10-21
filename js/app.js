@@ -1008,31 +1008,12 @@ function openSyncSheet() {
     const emailField = tmCreateField('邮箱', 'email', '', 100);
     const pwdField = tmCreateField('密码（至少 6 位）', 'password', '', 128);
     emailField.input.setAttribute('autocomplete', 'email');
-    emailField.input.setAttribute('autocapitalize', 'none');
-    emailField.input.setAttribute('autocorrect', 'off');
-    emailField.input.spellcheck = false;
     pwdField.input.setAttribute('autocomplete', 'current-password');
     form.appendChild(emailField.wrap);
     form.appendChild(pwdField.wrap);
     const note = document.createElement('div');
     note.className = 'tm-form-note';
     note.textContent = '用于家庭数据云端备份与多设备同步；未登录时应用完整运行在本地模式。';
-    const authMessage = document.createElement('div');
-    authMessage.className = 'tm-form-note';
-    authMessage.style.whiteSpace = 'pre-line';
-    authMessage.style.userSelect = 'text';
-    authMessage.setAttribute('role', 'status');
-    authMessage.setAttribute('aria-live', 'polite');
-    form.appendChild(authMessage);
-    const describeAuthError = error => {
-      const message = String((error && error.message) || '未知错误');
-      if (/invalid login credentials/i.test(message)) return '邮箱或密码错误，请重试';
-      if (/email not confirmed/i.test(message)) return '邮箱尚未确认，请先完成邮箱验证';
-      if (/load failed|failed to fetch|networkerror|network request failed/i.test(message)) {
-        return '无法连接云同步服务（网络请求失败）。请切换网络后重试；本机数据暂未切换到云端。';
-      }
-      return message;
-    };
     form.appendChild(note);
     panel.appendChild(form);
 
@@ -1058,19 +1039,25 @@ function openSyncSheet() {
       const email = emailField.input.value.trim();
       const pwd = pwdField.input.value;
       if (!email || !pwd) { showToast('请输入邮箱和密码'); return; }
-      loginBtn.disabled = regBtn.disabled = true;
-      loginBtn.textContent = '登录并加载中…';
-      authMessage.textContent = '正在验证账号并加载云端家庭数据，请稍候…';
+      loginBtn.disabled = true;
+      loginBtn.textContent = '请稍候…';
       SGASync.signIn(email, pwd).then(() => {
-        closeModal(); render();
-        showToast('登录并同步成功');
-      }).catch(error => {
-        const message = describeAuthError(error);
-        authMessage.textContent = message;
-        showToast(message);
-      }).finally(() => {
-        loginBtn.disabled = regBtn.disabled = false;
+        closeModal();
+        showToast('登录成功，正在同步数据…');
+      }).catch(err => {
+        loginBtn.disabled = false;
         loginBtn.textContent = '登录';
+        var msg = (err && err.message) ? String(err.message) : '未知错误';
+        /* Supabase 常见英文错误 → 中文提示，避免用户看不懂卡住 */
+        if (/email not confirmed/i.test(msg)) {
+          showToast('邮箱尚未确认，请先查收邮件（含垃圾邮件）点击确认链接，或重发确认邮件');
+        } else if (/invalid login credentials/i.test(msg)) {
+          showToast('邮箱或密码错误，请重试');
+        } else if (/user not found/i.test(msg)) {
+          showToast('该邮箱尚未注册，请先注册');
+        } else {
+          showToast('登录失败：' + msg);
+        }
       });
     });
 
@@ -1079,46 +1066,27 @@ function openSyncSheet() {
       const pwd = pwdField.input.value;
       if (!email || !pwd) { showToast('请输入邮箱和密码'); return; }
       if (pwd.length < 6) { showToast('密码至少 6 位'); return; }
-      regBtn.disabled = loginBtn.disabled = true;
+      regBtn.disabled = true;
       regBtn.textContent = '请稍候…';
-      authMessage.textContent = '正在注册并准备云端家庭数据…';
       SGASync.signUp(email, pwd).then(res => {
         if (res && res.data && res.data.session) {
           closeModal();
-          showToast('注册并同步成功');
+          showToast('注册成功，正在同步数据…');
         } else {
-          regBtn.disabled = loginBtn.disabled = false;
+          regBtn.disabled = false;
           regBtn.textContent = '注册';
           showToast('注册成功，请查收邮箱（含垃圾邮件）点击确认链接后再登录');
         }
       }).catch(err => {
-        regBtn.disabled = loginBtn.disabled = false;
+        regBtn.disabled = false;
         regBtn.textContent = '注册';
-        authMessage.textContent = describeAuthError(err);
-        showToast('注册失败：' + describeAuthError(err));
+        showToast('注册失败：' + (err && err.message ? err.message : '未知错误'));
       });
     });
 
     actions.appendChild(regBtn);
     actions.appendChild(loginBtn);
     panel.appendChild(actions);
-    const diagnoseBtn = document.createElement('button');
-    diagnoseBtn.className = 'btn btn-secondary';
-    diagnoseBtn.type = 'button';
-    diagnoseBtn.textContent = '检测云连接';
-    diagnoseBtn.style.cssText = 'width:100%;padding:12px;margin-top:12px;border-radius:24px;';
-    diagnoseBtn.addEventListener('click', () => {
-      diagnoseBtn.disabled = loginBtn.disabled = regBtn.disabled = true;
-      authMessage.textContent = '正在检测云服务和登录接口，不使用你输入的账号密码…';
-      SGASync.checkConnection().then(report => {
-        authMessage.textContent = report;
-      }).catch(error => {
-        authMessage.textContent = '连接检测失败：' + describeAuthError(error);
-      }).finally(() => {
-        diagnoseBtn.disabled = loginBtn.disabled = regBtn.disabled = false;
-      });
-    });
-    panel.appendChild(diagnoseBtn);
   } else {
     const info = document.createElement('div');
     info.className = 'tm-form-note';
