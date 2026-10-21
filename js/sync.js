@@ -75,24 +75,46 @@ var SGASync = (function () {
   function onChange(fn) { _listeners.push(fn); }
   function _notify() { _listeners.forEach(function (fn) { try { fn(status()); } catch (e) {} }); }
 
+  function authResult(result) {
+    if (result && result.error) throw result.error;
+    return result;
+  }
+
+  function bindFamily(fid) {
+    var cursor = _loadLocal();
+    if (cursor.familyId && cursor.familyId !== fid) {
+      var state = typeof getAppState === 'function' ? getAppState() : null;
+      if (state) {
+        localStorage.setItem(BIZ_KEY + '_account_backup_' + cursor.familyId, JSON.stringify(state));
+        Object.keys(state).forEach(function (key) { delete state[key]; });
+        state.childrenList = []; state.children = {}; state.currentChildId = '';
+        state.parentVerified = false; state.parentVerifyUntil = 0;
+        if (typeof saveState === 'function') saveState(state);
+      }
+      cursor = {};
+    }
+    cursor.familyId = fid;
+    _saveLocal(cursor);
+  }
+
   /* ---------- 认证 ---------- */
   function signUp(email, password) {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
-    return client.auth.signUp({ email: email, password: password });
+    return client.auth.signUp({ email: email, password: password }).then(authResult);
   }
   function signIn(email, password) {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
-    return client.auth.signInWithPassword({ email: email, password: password });
+    return client.auth.signInWithPassword({ email: email, password: password }).then(authResult);
   }
   function signOut() {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
-    return client.auth.signOut();
+    return Promise.all([_pendingPull, _pendingPush]).then(function () { return client.auth.signOut(); }).then(authResult);
   }
   /* 重发邮箱确认邮件（当前项目已关闭邮箱确认，此接口为防御性保留，
      将来若重新开启验证时可直接调用，无需改 sync.js 结构） */
   function resendConfirmationEmail(email) {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
-    return client.auth.resend({ type: 'signup', email: email });
+    return client.auth.resend({ type: 'signup', email: email }).then(authResult);
   }
 
   /* ---------- 家庭绑定 ----------
@@ -148,7 +170,10 @@ var SGASync = (function () {
     if (!_user) return Promise.reject(new Error('请先登录'));
     var c = String(code || '').trim().toUpperCase();
     if (!/^[A-Z0-9]{6}$/.test(c)) return Promise.reject(new Error('请输入 6 位邀请码'));
-    return client.rpc('join_family_by_code', { p_code: c }).then(function (res) {
+    if (_pushTimer) { clearTimeout(_pushTimer); _pushTimer = 0; }
+    return Promise.all([_pendingPull, _pendingPush]).then(function () {
+      return client.rpc('join_family_by_code', { p_code: c });
+    }).then(function (res) {
       if (res.error) throw res.error;
       var fid = res.data;
       if (!fid) throw new Error('加入失败：服务器未返回家庭标识');
@@ -162,7 +187,7 @@ var SGASync = (function () {
         }
         localStorage.removeItem(BIZ_KEY);
       } catch (e) {}
-      _saveLocal({ adoptCloudOnce: fid });
+      _saveLocal({ adoptCloudOnce: fid, familyId: fid });
       return fid;
     });
   }
@@ -205,11 +230,13 @@ var SGASync = (function () {
        返回 false + "推送正在进行中"，用户看到同步失败。合并模式下，两次调用
        等同一个 Promise 跑完就行，不报错、不丢数据。 */
     if (_pushing) return _pendingPush;
+    if (_pulling) return _pendingPull.then(function () { return _lastError ? false : pushNow(); });
     /* 加入家庭后的首拉完成前禁止一切推送：本机仍是种子/旧数据，
        回写会覆盖家庭云端真实数据（adoptCloudOnce 游标由 pullAndMerge 清除） */
     if (_loadLocal().adoptCloudOnce) { _lastError = '首次云端拉取未完成，暂时不推送'; _notify(); return Promise.resolve(false); }
     var st = (typeof getAppState === 'function') ? getAppState() : null;
     if (!st || !Array.isArray(st.childrenList)) { _lastError = '本地状态不可用'; _notify(); return Promise.resolve(false); }
+    st = JSON.parse(JSON.stringify(st)); /* Stable upload snapshot; later edits are retried. */
     _pushing = true; _lastError = ''; _notify();
     var fid = _familyId;
     var nowIso = new Date().toISOString();
@@ -240,7 +267,7 @@ var SGASync = (function () {
           family_id: fid, child_id: c.id, name: c.name,
           gender: c.gender || null, grade: c.grade || null,
           avatar: c.avatar || null, banner: c.banner || null,
-          sort_order: i, points: cs.points || 0, updated_at: nowIso
+          sort_order: i, updated_at: nowIso
         });
         profMetaUpdates.push({ key: pKey, h: pH });
       }
@@ -260,7 +287,7 @@ var SGASync = (function () {
           if (!cs) return;
           /* 积分流水（追加式，按游标增量） */
           var led = (cs.pointsHistory || []).filter(function (e) {
-            return e && e.id && VALID_LEDGER_TYPES[e.type] && (!minTime || (e.time || 0) > minTime);
+            return e && e.id && VALID_LEDGER_TYPES[e.type] && (e.revoked === true || !minTime || (e.time || 0) > minTime);
           }).map(function (e) {
             return {
               family_id: fid, child_id: c.id, client_id: String(e.id), type: e.type,
@@ -326,10 +353,12 @@ var SGASync = (function () {
           }
         }
         /* 首次全量上传完成标记（拉取侧据此执行"云端缺失=已删除"规则） */
-        jobs.push(client.from('family_settings').upsert({ family_id: fid, migration_state: { status: 'done' } }));
+        /* Mark migration complete only after every business write succeeds. */
         return Promise.all(jobs.map(function (j) {
           return j.then(function (r) { if (r && r.error) throw r.error; });
-        })).then(function () { return cfgMetaUpdates; });
+        })).then(function () {
+          return client.from('family_settings').upsert({ family_id: fid, migration_state: { status: 'done' } });
+        }).then(function (r) { if (r.error) throw r.error; return cfgMetaUpdates; });
       })
       .then(function (metaUpdates) {
         return metaUpdates.concat(profMetaUpdates);
@@ -343,7 +372,7 @@ var SGASync = (function () {
           });
         }
         syncSt.childIds = curIds;
-        syncSt.lastPushAt = Date.now();
+        syncSt.lastPushAt = Date.parse(nowIso);
         _saveLocal(syncSt);
         _lastSyncAt = Date.now();
         return true;
@@ -358,9 +387,9 @@ var SGASync = (function () {
   }
 
   function schedulePush() {
-    if (!_user || !_familyId) return;
+    if (!_user || !_familyId || _initializing) return;
     if (_pushTimer) clearTimeout(_pushTimer);
-    _pushTimer = setTimeout(function () { _pushTimer = 0; pushNow(); }, 2000);
+    _pushTimer = setTimeout(function () { _pushTimer = 0; syncAll(); }, 2000);
   }
 
   /* ---------- 拉取合并 ---------- */
@@ -375,15 +404,34 @@ var SGASync = (function () {
     cs.points = sum > 0 ? sum : 0;
   }
 
+  /* Read deterministic pages instead of silently truncating at the API row limit. */
+  function readRows(table, cid) {
+    var rows = [], offset = 0, size = 500;
+    var fid = _familyId;
+    function next() {
+      var query = client.from(table).select('*').eq('family_id', fid);
+      if (cid != null) query = query.eq('child_id', cid);
+      if (table === 'checkins') query = query.order('day').order('task_id');
+      else query = query.order(table === 'children' ? 'child_id' : 'client_id');
+      return query.range(offset, offset + size - 1).then(function (r) {
+        if (r.error) throw r.error;
+        var page = r.data || [];
+        rows = rows.concat(page);
+        if (page.length < size) return { data: rows, error: null };
+        offset += page.length;
+        return next();
+      });
+    }
+    return next();
+  }
+
   /* 云端孩子 → 本地新记录（新设备场景） */
   function buildChildFromCloud(ck) {
     var cid = ck.child_id;
     return Promise.all([
-      client.from('points_ledger').select('*').eq('family_id', _familyId).eq('child_id', cid)
-        .order('occurred_at', { ascending: false }),
-      client.from('checkins').select('*').eq('family_id', _familyId).eq('child_id', cid),
-      client.from('redemptions').select('*').eq('family_id', _familyId).eq('child_id', cid)
-        .order('occurred_at', { ascending: false }),
+      readRows('points_ledger', cid),
+      readRows('checkins', cid),
+      readRows('redemptions', cid),
       client.from('child_task_config').select('data,updated_at').eq('family_id', _familyId).eq('child_id', cid).maybeSingle()
     ]).then(function (rs) {
       if (rs[0].error) throw rs[0].error;
@@ -434,11 +482,9 @@ var SGASync = (function () {
      任务配置按哈希门控规则：云端更新且本地自上次同步后未改 → 采纳云端 */
   function mergeChildFromCloud(cid, cb, syncSt) {
     return Promise.all([
-      client.from('points_ledger').select('*').eq('family_id', _familyId).eq('child_id', cid)
-        .order('occurred_at', { ascending: false }),
-      client.from('checkins').select('*').eq('family_id', _familyId).eq('child_id', cid),
-      client.from('redemptions').select('*').eq('family_id', _familyId).eq('child_id', cid)
-        .order('occurred_at', { ascending: false }),
+      readRows('points_ledger', cid),
+      readRows('checkins', cid),
+      readRows('redemptions', cid),
       client.from('child_task_config').select('data,updated_at').eq('family_id', _familyId).eq('child_id', cid).maybeSingle()
     ]).then(function (rs) {
       if (rs[0].error) throw rs[0].error;
@@ -449,9 +495,13 @@ var SGASync = (function () {
       var cs = cb;
       /* 流水并集（client_id 幂等） */
       var known = {};
-      (cs.pointsHistory || []).forEach(function (e) { if (e && e.id) known[String(e.id)] = 1; });
+      (cs.pointsHistory || []).forEach(function (e) { if (e && e.id) known[String(e.id)] = e; });
       (rs[0].data || []).forEach(function (l) {
-        if (known[String(l.client_id)]) return;
+        var existing = known[String(l.client_id)];
+        if (existing) {
+          if (l.revoked === true && existing.revoked !== true) { existing.revoked = true; changed = true; }
+          return;
+        }
         cs.pointsHistory.push({
           id: l.client_id, type: l.type, amount: Math.abs(l.amount || 0),
           desc: l.description || '', time: Date.parse(l.occurred_at) || Date.now(),
@@ -459,6 +509,11 @@ var SGASync = (function () {
           revoked: l.revoked === true ? true : undefined
         });
         changed = true;
+      });
+      cs.pointsHistory.forEach(function (e) {
+        if (e.type === 'revoke' && e.refId && known[String(e.refId)] && !known[String(e.refId)].revoked) {
+          known[String(e.refId)].revoked = true; changed = true;
+        }
       });
       if (changed) cs.pointsHistory.sort(function (a, b) { return (b.time || 0) - (a.time || 0); });
       /* 打卡：云端较新则采纳 */
@@ -507,6 +562,7 @@ var SGASync = (function () {
   function pullAndMerge() {
     if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
     if (_pulling) return _pendingPull; /* 合并到同一个 pending Pull */
+    if (_pushing) return _pendingPush.then(function () { return _lastError ? false : pullAndMerge(); });
     var st = (typeof getAppState === 'function') ? getAppState() : null;
     if (!st) { _lastError = '本地状态不可用'; _notify(); return Promise.resolve(false); }
     _pulling = true; _lastError = ''; _notify();
@@ -526,15 +582,13 @@ var SGASync = (function () {
       .then(function (r0) {
         if (r0.error) throw r0.error;
         var done = !!(r0.data && r0.data.migration_state && r0.data.migration_state.status === 'done');
-        return client.from('children').select('*').eq('family_id', fid).then(function (r1) {
+        return readRows('children').then(function (r1) {
           if (r1.error) throw r1.error;
           var cloudKids = r1.data || [];
           var cloudIds = {};
           cloudKids.forEach(function (ck) { cloudIds[ck.child_id] = 1; });
 
-          var effAdopt = adoptFid ||
-            (bootAdopt && cloudKids.length > 0 &&
-             Array.isArray(st.childrenList) && st.childrenList.length > 0);
+          var effAdopt = adoptFid || (bootAdopt && (done || cloudKids.length > 0));
           if (effAdopt && !adoptFid) {
             /* 首登采纳前备份本机业务数据（一次性保险，不覆盖已有备份；
                全新设备无业务数据时不写空备份——键缺失=无需恢复） */
@@ -548,6 +602,19 @@ var SGASync = (function () {
 
           var jobs = cloudKids.map(function (ck) {
             var cid = ck.child_id;
+            /* A previously synced child missing locally is a pending local deletion. */
+            if (!effAdopt && Array.isArray(syncSt.childIds) &&
+                syncSt.childIds.indexOf(cid) !== -1 && !st.children[cid]) return Promise.resolve();
+            if (effAdopt) {
+              return buildChildFromCloud(ck).then(function (built) {
+                st.children[cid] = built.cs;
+                st.childrenList = st.childrenList.filter(function (c) { return c.id !== cid; });
+                st.childrenList.push(built.profile);
+                _cfgMeta(syncSt)['task:' + cid] = { h: _hashCfg(built.cs.taskConfig), cloud: built.cfgUpdatedAt };
+                _cfgMeta(syncSt)['prof:' + cid] = { h: _hashCfg(_profObj(built.profile)), cloud: ck.updated_at || null };
+                changedAny = true;
+              });
+            }
             if (st.children[cid]) {
               var prof = null;
               for (var pi = 0; pi < st.childrenList.length; pi++) {
@@ -602,6 +669,13 @@ var SGASync = (function () {
           });
 
           return Promise.all(jobs).then(function () {
+            if (effAdopt) {
+              st.childrenList = st.childrenList.filter(function (c) { return cloudIds[c.id]; });
+              Object.keys(st.children).forEach(function (id) { if (!cloudIds[id]) delete st.children[id]; });
+              if (!cloudIds[st.currentChildId]) st.currentChildId = st.childrenList.length ? st.childrenList[0].id : '';
+              st.parentVerified = false; st.parentVerifyUntil = 0;
+              changedAny = true;
+            }
             /* 迁移已完成时，云端缺失的孩子视为已在其他设备删除。
                但只删除"上次已推送过"的孩子：本地新建尚未推送的孩子
                （不在 childIds 里）不能当作他人删除，否则 syncAll 先拉后推
@@ -654,6 +728,7 @@ var SGASync = (function () {
         /* 加入家庭首拉完成：清除 adopt 标记，本设备恢复正常推送。
            失败路径保留标记，下次拉取继续以云端为准，期间推送保持禁止 */
         if (syncSt.adoptCloudOnce === fid) {
+          syncSt.familyId = fid;
           delete syncSt.adoptCloudOnce;
           _saveLocal(syncSt);
         }
@@ -663,6 +738,12 @@ var SGASync = (function () {
           _saveLocal(syncSt);
         }
         if (changedAny) {
+          /* Register cloud-only children so their normal task buttons work immediately. */
+          if (typeof registerChildBuiltinTasks === 'function' && typeof getBuiltinTasks === 'function') {
+            st.childrenList.forEach(function (c) {
+              registerChildBuiltinTasks(c.id, getBuiltinTasks(c.id).map(function (t) { return { id: t.id, points: t.points }; }));
+            });
+          }
           if (typeof saveState === 'function') saveState(st);
           _saveLocal(syncSt);
           _lastSyncAt = Date.now();
@@ -706,6 +787,7 @@ var SGASync = (function () {
       _familyUserId = _user.id;
       _lastError = '';
       ensureFamily().then(function (fid) {
+        bindFamily(fid);
         _familyId = fid;
         return pullAndMerge();
       }).then(function () {
@@ -739,7 +821,7 @@ var SGASync = (function () {
       if (_pushTimer) {
         clearTimeout(_pushTimer);
         _pushTimer = 0;
-        pushNow();
+        syncAll();
       }
     }
     document.addEventListener('visibilitychange', function () {

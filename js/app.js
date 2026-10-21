@@ -37,8 +37,24 @@ const SVG = {
 };
 
 /* 任务/奖励图标：assets 路径渲染为图片，否则渲染 emoji（替代资源） */
+function escapeHTML(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function safeAssetURL(value) {
+  const path = String(value || '');
+  return /^assets\/[a-zA-Z0-9_./-]+$/.test(path) && !path.split('/').includes('..') ? path : '';
+}
+function safeColor(value) {
+  return /^#[0-9a-f]{3,8}$/i.test(String(value || '')) ? value : '#E2F2FC';
+}
+function readIntegerInput(input) {
+  const text = input.value.trim();
+  const n = /^\d+$/.test(text) ? Number(text) : NaN;
+  return Number.isSafeInteger(n) ? n : NaN;
+}
 function iconInner(icon) {
-  return icon.startsWith('assets/') ? `<img src="${icon}" alt="">` : icon;
+  const asset = safeAssetURL(icon);
+  return asset ? '<img src="' + escapeHTML(asset) + '" alt="">' : escapeHTML(icon);
 }
 
 /* ---------- 今天打卡 ---------- */
@@ -57,23 +73,23 @@ function renderCheckin() {
   pageContent.innerHTML = `
     <header class="scenic-header checkin-hero">
       <img class="scenic-img" src="${ASSETS.scenicCheckin}" alt="">
-      <img class="hero-child" src="${child.banner}" alt="${child.name}">
+      <img class="hero-child" src="${escapeHTML(safeAssetURL(child.banner))}" alt="${escapeHTML(child.name)}">
       <div class="hero-greeting">
-        <h1>${greetingText()}，<br>${child.name}</h1>
+        <h1>${greetingText()}，<br>${escapeHTML(child.name)}</h1>
         <div class="date-line">${formatDate(new Date())}</div>
       </div>
       <div class="child-capsules">
         <button class="current-child-pill" id="child-switcher" type="button" aria-label="切换孩子">
-          <img class="cc-avatar" src="${child.avatar}" alt="${child.name}">
+          <img class="cc-avatar" src="${escapeHTML(safeAssetURL(child.avatar))}" alt="${escapeHTML(child.name)}">
           <span>
-            <div class="cc-name">${child.name}</div>
-            <div class="cc-grade">${child.grade}</div>
+            <div class="cc-name">${escapeHTML(child.name)}</div>
+            <div class="cc-grade">${escapeHTML(child.grade)}</div>
           </span>
           ${SVG.chevronDown}
         </button>
-        ${other ? `<button class="switch-child-pill" id="quick-switch" type="button" aria-label="切换到${other.name}">
-          <img class="sc-avatar" src="${other.avatar}" alt="${other.name}">
-          <span class="sc-name">${other.name}</span>
+        ${other ? `<button class="switch-child-pill" id="quick-switch" type="button" aria-label="切换到${escapeHTML(other.name)}">
+          <img class="sc-avatar" src="${escapeHTML(safeAssetURL(other.avatar))}" alt="${escapeHTML(other.name)}">
+          <span class="sc-name">${escapeHTML(other.name)}</span>
           ${SVG.repeat}
         </button>` : ''}
       </div>
@@ -106,7 +122,7 @@ function renderCheckin() {
       <div class="progress-desc">${doneCount === totalCount ? '今天的任务都完成啦！' : `还有 ${totalCount - doneCount} 项待完成`}</div>
     </div>
     <div class="section-title">今日任务</div>
-    ${doneCount === totalCount ? emptyState() : taskListHTML(tasks, checkins, child)}
+    ${doneCount === totalCount ? emptyState() : ''}${taskListHTML(tasks, checkins, child)}
   `;
 
   document.getElementById('child-switcher').addEventListener('click', openChildPicker);
@@ -142,11 +158,11 @@ function taskListHTML(tasks, checkins, child) {
     else {
       const done = !!(checkins[t.id] && checkins[t.id].completed);
       html += `<div class="task-row ${done ? 'is-completed' : ''}">
-        <div class="task-icon" style="background:${t.iconBg};">${iconInner(t.icon)}</div>
-        <div class="task-main"><div class="task-name">${t.name}</div><div class="task-desc">${t.desc}</div></div>
+        <div class="task-icon" style="background:${safeColor(t.iconBg)};">${iconInner(t.icon)}</div>
+        <div class="task-main"><div class="task-name">${escapeHTML(t.name)}</div><div class="task-desc">${escapeHTML(t.desc)}</div></div>
         <div class="task-meta"><span class="points-tag">+${t.points}</span>
-          ${done ? `<button class="undo-btn" data-undo-id="${t.id}" type="button" aria-label="撤销打卡">撤销</button>` : ''}
-          <button class="check-btn" data-task-id="${t.id}" type="button" aria-label="${done ? '已完成' : '打卡'}">
+          ${done ? `<button class="undo-btn" data-undo-id="${escapeHTML(t.id)}" type="button" aria-label="撤销打卡">撤销</button>` : ''}
+          <button class="check-btn" data-task-id="${escapeHTML(t.id)}" type="button" aria-label="${done ? '已完成' : '打卡'}">
             ${done ? SVG.check : ''}
           </button></div></div>`;
     }
@@ -163,15 +179,15 @@ function gradeGoalRowHTML(task, ggRec, child) {
   task.options.forEach(opt => {
     const isSel = selected === opt.value;
     const cls = done && isSel ? 'is-selected-and-done' : (isSel ? 'is-selected' : '');
-    optsHTML += `<button class="grade-option ${cls}" data-value="${opt.value}" type="button" ${done ? 'disabled' : ''}><span class="grade-opt-label">${opt.label}</span><span class="grade-opt-pts">+${cfg[opt.value]}</span></button>`;
+    optsHTML += `<button class="grade-option ${cls}" data-value="${escapeHTML(opt.value)}" type="button" ${done ? 'disabled' : ''}><span class="grade-opt-label">${escapeHTML(opt.label)}</span><span class="grade-opt-pts">+${cfg[opt.value]}</span></button>`;
   });
   const selectedLabel = selected === 'top3' ? '满分或前三' : (selected === 'top5' ? '前五' : '');
   /* 已发放积分优先显示当日快照，旧记录无快照时回退当前配置 */
   const awarded = (ggRec && typeof ggRec.points === 'number') ? ggRec.points : (selected ? cfg[selected] : '');
   return `<div class="task-row grade-goal-row ${done ? 'is-completed' : ''}">
     <div class="task-head">
-      <div class="task-icon" style="background:${task.iconBg};">${iconInner(task.icon)}</div>
-      <div class="task-main"><div class="task-name">${task.name}</div><div class="task-desc">${task.desc}</div></div>
+      <div class="task-icon" style="background:${safeColor(task.iconBg)};">${iconInner(task.icon)}</div>
+      <div class="task-main"><div class="task-name">${escapeHTML(task.name)}</div><div class="task-desc">${escapeHTML(task.desc)}</div></div>
     </div>
     <div class="grade-options">${optsHTML}</div>
     ${done ? `<div class="grade-done-row"><span class="grade-done-tip">✓ 已按「${selectedLabel}」打卡 +${awarded}</span><button class="undo-btn" data-grade-undo="1" type="button">撤销</button></div>` : ''}
@@ -194,7 +210,7 @@ function handleTaskCheckin(task) {
 
 function openUndoConfirm(task) {
   const child = getCurrentChild();
-  showSheet(`<div class="sheet-title">撤销打卡</div><div class="sheet-body">确定撤销 <strong>${task.name}</strong> 今天的打卡吗？<br/>将同时扣回本次打卡获得的积分。</div>
+  showSheet(`<div class="sheet-title">撤销打卡</div><div class="sheet-body">确定撤销 <strong>${escapeHTML(task.name)}</strong> 今天的打卡吗？<br/>将同时扣回本次打卡获得的积分。</div>
     <div class="sheet-actions"><button class="btn btn-secondary" id="cancel-undo" type="button">取消</button><button class="btn btn-primary" id="confirm-undo" type="button">确认撤销</button></div>`);
   document.getElementById('cancel-undo').addEventListener('click', closeModal);
   document.getElementById('confirm-undo').addEventListener('click', () => {
@@ -239,9 +255,9 @@ function openGradeUndoConfirm() {
 
 function openChildPicker() {
   const current = getCurrentChild();
-  const items = getChildren().map(c => `<button class="child-picker-item ${c.id === current.id ? 'is-current' : ''}" data-child-id="${c.id}" type="button">
-    <img class="cp-avatar" src="${c.avatar}" alt="${c.name}">
-    <span class="cp-info"><span class="cp-name">${c.name}</span><span class="cp-sub">${c.grade} · ${getChildTasks(c.id).length} 项任务</span></span>
+  const items = getChildren().map(c => `<button class="child-picker-item ${c.id === current.id ? 'is-current' : ''}" data-child-id="${escapeHTML(c.id)}" type="button">
+    <img class="cp-avatar" src="${escapeHTML(safeAssetURL(c.avatar))}" alt="${escapeHTML(c.name)}">
+    <span class="cp-info"><span class="cp-name">${escapeHTML(c.name)}</span><span class="cp-sub">${escapeHTML(c.grade)} · ${getChildTasks(c.id).length} 项任务</span></span>
     ${c.id === current.id ? '<span class="cp-dot">●</span>' : ''}</button>`).join('');
   showSheet(`<div class="sheet-title">切换孩子</div><div class="child-picker-list">${items}</div>`);
   modalRoot.querySelectorAll('.child-picker-item').forEach(btn => {
@@ -259,13 +275,13 @@ function renderRewards() {
   const tabs = REWARD_CATEGORIES.map(cat => `<button class="cat-tab ${cat === currentCategory ? 'is-active' : ''}" data-cat="${cat}" type="button">${cat}</button>`).join('');
   const cards = filtered.map(r => {
     const enough = cs.points >= r.cost;
-    return `<div class="gift-card" style="background:${r.cardBg};">
-      <div class="gift-img-wrap">${r.image ? `<img src="${r.image}" alt="${r.name}">` : `<span class="gift-emoji">${r.icon}</span>`}</div>
+    return `<div class="gift-card" style="background:${safeColor(r.cardBg)};">
+      <div class="gift-img-wrap">${r.image ? `<img src="${escapeHTML(safeAssetURL(r.image))}" alt="${escapeHTML(r.name)}">` : `<span class="gift-emoji">${iconInner(r.icon)}</span>`}</div>
       <div class="gift-info">
-        <div class="gift-name">${r.name}</div>
-        <div class="gift-desc">${r.desc}</div>
+        <div class="gift-name">${escapeHTML(r.name)}</div>
+        <div class="gift-desc">${escapeHTML(r.desc)}</div>
         <div class="gift-cost">${r.cost}<small>积分</small></div>
-        <button class="redeem-btn" data-reward-id="${r.id}" type="button" ${enough ? '' : 'disabled'}>${enough ? '兑换' : '积分不足'}</button>
+        <button class="redeem-btn" data-reward-id="${escapeHTML(r.id)}" type="button" ${enough ? '' : 'disabled'}>${enough ? '兑换' : '积分不足'}</button>
       </div></div>`;
   }).join('');
   const records = (cs.redemptions || []).slice(0, 5).map(rd => recordRowHTML(rd)).join('') || '<div class="record-empty">暂无兑换记录</div>';
@@ -298,9 +314,9 @@ function renderRewards() {
 
 function recordRowHTML(rd) {
   const reward = getAllRewardsForManagement().find(r => r.id === rd.rewardId);
-  const iconHTML = reward && reward.image ? `<img src="${reward.image}" alt="">` : (reward ? reward.icon : '🎁');
+  const iconHTML = reward && reward.image ? `<img src="${escapeHTML(safeAssetURL(reward.image))}" alt="">` : (reward ? iconInner(reward.icon) : '🎁');
   return `<div class="record-row"><div class="record-icon">${iconHTML}</div>
-    <div class="record-info"><div class="r-name">${rd.name}</div><div class="r-time">${formatTime(rd.time)}</div></div>
+    <div class="record-info"><div class="r-name">${escapeHTML(rd.name)}</div><div class="r-time">${formatTime(rd.time)}</div></div>
     <div class="record-status">已兑换</div></div>`;
 }
 
@@ -308,7 +324,7 @@ function openRedeemConfirm(reward) {
   const child = getCurrentChild();
   const cs = getChildState(child.id);
   if (cs.points < reward.cost) { showToast('积分不足，无法兑换'); return; }
-  showSheet(`<div class="sheet-title">确认兑换</div><div class="sheet-body">确定用 <strong>${reward.cost} 积分</strong> 兑换<br/><strong>${reward.icon} ${reward.name}</strong> 吗？</div>
+  showSheet(`<div class="sheet-title">确认兑换</div><div class="sheet-body">确定用 <strong>${reward.cost} 积分</strong> 兑换<br/><strong>${iconInner(reward.icon)} ${escapeHTML(reward.name)}</strong> 吗？</div>
     <div class="sheet-actions"><button class="btn btn-secondary" id="cancel-redeem" type="button">取消</button><button class="btn btn-primary" id="confirm-redeem" type="button">确认兑换</button></div>`);
   document.getElementById('cancel-redeem').addEventListener('click', closeModal);
   document.getElementById('confirm-redeem').addEventListener('click', () => {
@@ -360,7 +376,7 @@ function renderParent() {
         <span class="menu-arrow">›</span></button>
       <button class="menu-item" data-action="sync" type="button">
         <div class="menu-icon" style="background:#E4F3F7;color:#2E8FA8;">${SVG.cloud}</div>
-        <div class="menu-main"><div class="m-title">云同步</div><div class="m-desc">${syncMenuDesc()}</div></div>
+        <div class="menu-main"><div class="m-title">云同步</div><div class="m-desc">${escapeHTML(syncMenuDesc())}</div></div>
         <span class="menu-arrow">›</span></button>
       <button class="menu-item" data-action="logout" type="button">
         <div class="menu-icon" style="background:#FDE6E4;color:#C45050;">${SVG.logout}</div>
@@ -377,7 +393,12 @@ function renderParent() {
     </div>`;
 
   document.querySelectorAll('.menu-item').forEach(item => item.addEventListener('click', () => handleParentAction(item.dataset.action)));
-  document.querySelectorAll('.child-card').forEach(card => card.addEventListener('click', () => openChildDetail(card.dataset.childId)));
+  document.querySelectorAll('.child-card').forEach(card => {
+    card.addEventListener('click', () => openChildDetail(card.dataset.childId));
+    card.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openChildDetail(card.dataset.childId); }
+    });
+  });
   document.getElementById('add-child-btn').addEventListener('click', openAddChildForm);
 }
 
@@ -387,10 +408,10 @@ function childCardHTML(c) {
   const done = tasks.filter(t => checkins[t.id] && checkins[t.id].completed).length;
   const total = tasks.length;
   const pct = total ? Math.round((done / total) * 100) : 0;
-  return `<div class="child-card" data-child-id="${c.id}" role="button" tabindex="0">
+  return `<div class="child-card" data-child-id="${escapeHTML(c.id)}" role="button" tabindex="0">
     <div class="cc-top">
-      <img class="cc-avatar" src="${c.avatar}" alt="${c.name}">
-      <div class="cc-info"><div class="cc-name">${c.name}</div><div class="cc-sub">${c.grade} · 当前积分 ${getChildState(c.id).points}</div></div>
+      <img class="cc-avatar" src="${escapeHTML(safeAssetURL(c.avatar))}" alt="${escapeHTML(c.name)}">
+      <div class="cc-info"><div class="cc-name">${escapeHTML(c.name)}</div><div class="cc-sub">${escapeHTML(c.grade)} · 当前积分 ${getChildState(c.id).points}</div></div>
       <span class="cc-detail">详情 ${SVG.chevronRight}</span>
     </div>
     <div class="cc-progress-row">
@@ -406,10 +427,10 @@ function openChildDetail(childId) {
   if (!c) return;
   const cs = getChildState(childId);
   const tasks = getChildTasks(childId);
-  showSheet(`<div class="sheet-title">${c.name} 的信息</div>
-    <div class="record-row"><img class="record-icon" src="${c.avatar}" alt="" style="border-radius:12px;"><div class="record-info"><div class="r-name">${c.name}（${c.grade}）</div><div class="r-time">当前积分：${cs.points} · 今日任务 ${tasks.length} 项</div></div></div>
+  showSheet(`<div class="sheet-title">${escapeHTML(c.name)} 的信息</div>
+    <div class="record-row"><img class="record-icon" src="${escapeHTML(safeAssetURL(c.avatar))}" alt="" style="border-radius:12px;"><div class="record-info"><div class="r-name">${escapeHTML(c.name)}（${escapeHTML(c.grade)}）</div><div class="r-time">当前积分：${cs.points} · 今日任务 ${tasks.length} 项</div></div></div>
     <div style="max-height:38vh;overflow-y:auto;margin-top:8px;">
-      ${tasks.map(t => `<div class="record-row"><div class="record-icon" style="background:${t.iconBg};font-size:16px;">${iconInner(t.icon)}</div><div class="record-info"><div class="r-name">${t.name}</div><div class="r-time">${t.desc} · +${t.points}分</div></div></div>`).join('')}
+      ${tasks.map(t => `<div class="record-row"><div class="record-icon" style="background:${safeColor(t.iconBg)};font-size:16px;">${iconInner(t.icon)}</div><div class="record-info"><div class="r-name">${escapeHTML(t.name)}</div><div class="r-time">${escapeHTML(t.desc)} · +${t.points}分</div></div></div>`).join('')}
     </div>
     <div class="child-detail-actions">
       <button class="btn btn-primary" id="other-reward-btn" type="button">🎁 其他奖励（直接加分）</button>
@@ -429,7 +450,7 @@ function openDeleteChildConfirm(childId) {
   const c = getChildProfile(childId);
   if (!c) return;
   showSheet(`<div class="sheet-title">删除孩子</div>
-    <div class="sheet-body">确定删除孩子「${c.name}」吗？<br/>此操作将删除该孩子的打卡记录、积分、积分流水、兑换记录及个人配置，且无法自动恢复。</div>
+    <div class="sheet-body">确定删除孩子「${escapeHTML(c.name)}」吗？<br/>此操作将删除该孩子的打卡记录、积分、积分流水、兑换记录及个人配置，且无法自动恢复。</div>
     <div class="sheet-actions"><button class="btn btn-secondary" id="cancel-del-child" type="button">取消</button><button class="btn btn-danger" id="confirm-del-child" type="button">确认删除</button></div>`);
   document.getElementById('cancel-del-child').addEventListener('click', () => { closeModal(); openChildDetail(childId); });
   document.getElementById('confirm-del-child').addEventListener('click', () => {
@@ -488,7 +509,7 @@ function openOtherRewardForm(childId) {
   submitBtn.addEventListener('click', () => {
     if (submitting) return; /* 防重复提交 */
     const reason = reasonField.input.value;
-    const amount = parseInt(amountField.input.value, 10);
+    const amount = readIntegerInput(amountField.input);
     const res = grantOtherReward(childId, reason, amount);
     if (!res.success) {
       if (res.reason === 'invalid_reason') showToast('请填写奖励事由（不超过 50 字）');
@@ -557,7 +578,7 @@ function openInitialPointsForm(childId) {
   let submitting = false;
   saveBtn.addEventListener('click', () => {
     if (submitting) return;
-    const amount = parseInt(amountField.input.value, 10);
+    const amount = readIntegerInput(amountField.input);
     submitting = true;
     saveBtn.disabled = true;
     /* 执行设置：差额流水按"当时的本机余额"计算 */
@@ -690,7 +711,7 @@ function openAddChildForm() {
     if (submitting) return; /* 防重复点击 */
     const name = nameField.input.value.trim();
     const grade = gradeField.input.value.trim();
-    const points = parseInt(pointsField.input.value, 10);
+    const points = readIntegerInput(pointsField.input);
     const res = addChild(
       { name: name, grade: grade, gender: picked.gender, avatar: picked.avatar, banner: picked.banner },
       getNewChildTaskTemplate(),
@@ -984,7 +1005,7 @@ function openSyncSheet() {
 
   if (!st.signedIn) {
     const emailField = tmCreateField('邮箱', 'email', '', 100);
-    const pwdField = tmCreateField('密码（至少 6 位）', 'password', '', 30);
+    const pwdField = tmCreateField('密码（至少 6 位）', 'password', '', 128);
     emailField.input.setAttribute('autocomplete', 'email');
     pwdField.input.setAttribute('autocomplete', 'current-password');
     form.appendChild(emailField.wrap);
@@ -1261,9 +1282,9 @@ function openPointsSheet(childId) {
     const bg = positive ? 'var(--color-primary-soft)' : '#FDE6E4';
     const color = positive ? 'var(--color-primary-dark)' : '#C45050';
     const undoBtn = (h.type === 'bonus' && h.revoked !== true)
-      ? `<button class="btn btn-secondary tm-btn-sm" data-bonus-undo="${h.id}" type="button">撤销</button>`
+      ? `<button class="btn btn-secondary tm-btn-sm" data-bonus-undo="${escapeHTML(h.id)}" type="button">撤销</button>`
       : '';
-    return `<div class="record-row"><div class="record-icon" style="background:${bg}">${icon}</div><div class="record-info"><div class="r-name">${h.desc}</div><div class="r-time">${formatTime(h.time)}${revokedTag}</div></div><div class="record-status" style="color:${color};background:${bg}">${positive ? '+' : '-'}${h.amount}</div>${undoBtn}</div>`;
+    return `<div class="record-row"><div class="record-icon" style="background:${bg}">${icon}</div><div class="record-info"><div class="r-name">${escapeHTML(h.desc)}</div><div class="r-time">${formatTime(h.time)}${revokedTag}</div></div><div class="record-status" style="color:${color};background:${bg}">${positive ? '+' : '-'}${h.amount}</div>${undoBtn}</div>`;
   }).join('') || '<div class="record-empty">暂无流水</div>';
   showSheet(`<div class="sheet-title">积分流水</div><div style="max-height:50vh;overflow-y:auto;">${list}</div>`);
   document.querySelectorAll('[data-bonus-undo]').forEach(btn => {
@@ -1277,7 +1298,7 @@ function openBonusUndoConfirm(childId, historyId) {
   const cs = getChildState(childId);
   const entry = (cs && Array.isArray(cs.pointsHistory) ? cs.pointsHistory : []).find(h => h && h.id === historyId);
   if (!entry) { showToast('未找到该奖励记录'); return; }
-  showSheet(`<div class="sheet-title">撤销其他奖励</div><div class="sheet-body">确定撤销给 ${child ? child.name : '孩子'} 的「${entry.reason || ''}」奖励吗？<br/>将扣回本次实际增加的 ${entry.amount} 积分。</div>
+  showSheet(`<div class="sheet-title">撤销其他奖励</div><div class="sheet-body">确定撤销给 ${escapeHTML(child ? child.name : '孩子')} 的「${escapeHTML(entry.reason || '')}」奖励吗？<br/>将扣回本次实际增加的 ${entry.amount} 积分。</div>
     <div class="sheet-actions"><button class="btn btn-secondary" id="cancel-bonus-undo" type="button">取消</button><button class="btn btn-primary" id="confirm-bonus-undo" type="button">确认撤销</button></div>`);
   document.getElementById('cancel-bonus-undo').addEventListener('click', closeModal);
   document.getElementById('confirm-bonus-undo').addEventListener('click', () => {
@@ -1475,8 +1496,8 @@ function openGradeGoalPointsForm(childId) {
   saveBtn.type = 'button';
   saveBtn.textContent = '保存';
   saveBtn.addEventListener('click', () => {
-    const top3 = parseInt(top3Field.input.value, 10);
-    const top5 = parseInt(top5Field.input.value, 10);
+    const top3 = readIntegerInput(top3Field.input);
+    const top5 = readIntegerInput(top5Field.input);
     const res = setGradeGoalPointsConfig(childId, { top3, top5 });
     if (!res.success) {
       if (res.reason === 'invalid_child') showToast('孩子不存在');
@@ -1618,7 +1639,7 @@ function openTaskForm(childId, task) {
   saveBtn.addEventListener('click', () => {
     const name = nameField.input.value.trim();
     const desc = descField.input.value.trim();
-    const points = parseInt(pointsField.input.value, 10);
+    const points = readIntegerInput(pointsField.input);
     const payload = { name, desc, points };
     if (iconField) payload.icon = iconField.input.value.trim();
     if (bgField) payload.iconBg = bgField.input.value.trim();
@@ -1652,6 +1673,9 @@ function tmCreateField(label, type, value, maxLength) {
   const input = document.createElement('input');
   input.type = type;
   input.className = 'tm-input';
+  input.id = 'field-' + Math.random().toString(36).slice(2);
+  lbl.htmlFor = input.id;
+  if (type === 'number') { input.step = '1'; input.min = '0'; input.inputMode = 'numeric'; }
   if (value !== undefined) input.value = value;
   if (maxLength) input.maxLength = maxLength;
   wrap.appendChild(lbl);
@@ -1854,7 +1878,7 @@ function openRewardForm(reward) {
   saveBtn.addEventListener('click', () => {
     const name = nameField.input.value.trim();
     const desc = descField.input.value.trim();
-    const cost = parseInt(costField.input.value, 10);
+    const cost = readIntegerInput(costField.input);
     const category = categoryField.input.value.trim();
     const payload = { name, desc, cost, category };
     if (iconField) payload.icon = iconField.input.value.trim();
