@@ -37,7 +37,13 @@ var SGASync = (function () {
 
   var _user = null;
   var _familyId = null;
-  var _syncing = false;
+  /* 拆分守卫：pullAndMerge 用 _pulling、pushNow 用 _pushing。
+     原 _syncing 共用标志会导致"用户改项目→后台 schedulePush 还没跑完时
+     手动点立即同步→syncAll 里 pull 被后台 push 拦住、push 又被同一个
+     标志拦住，整条 syncAll 静默以 lastError='' 结束"（用户实际报"未知错误"
+     根因，2026-10-21 修复）。 */
+  var _pulling = false;
+  var _pushing = false;
   var _lastError = '';
   var _lastSyncAt = 0;
   var _listeners = [];
@@ -59,7 +65,7 @@ var SGASync = (function () {
       signedIn: !!_user,
       email: _user ? (_user.email || '') : '',
       familyId: _familyId,
-      syncing: _syncing,
+      syncing: _pulling || _pushing,
       lastError: _lastError,
       lastSyncAt: _lastSyncAt
     };
@@ -190,13 +196,16 @@ var SGASync = (function () {
 
   /* ---------- 推送（增量：流水/打卡/兑换按时间游标，配置按内容哈希门控）---------- */
   function pushNow() {
-    if (!_user || !_familyId || _syncing) return Promise.resolve(false);
+    if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
+    /* 推送重入守卫（与 pullAndMerge 独立）——后台防抖推送正在跑时，
+       syncAll 串行调用 pushNow 不会被这个守卫拦，因为 pull 阶段早已完成 */
+    if (_pushing) { _lastError = '推送已在进行中，请稍后'; _notify(); return Promise.resolve(false); }
     /* 加入家庭后的首拉完成前禁止一切推送：本机仍是种子/旧数据，
        回写会覆盖家庭云端真实数据（adoptCloudOnce 游标由 pullAndMerge 清除） */
-    if (_loadLocal().adoptCloudOnce) return Promise.resolve(false);
+    if (_loadLocal().adoptCloudOnce) { _lastError = '首次云端拉取未完成，暂时不推送'; _notify(); return Promise.resolve(false); }
     var st = (typeof getAppState === 'function') ? getAppState() : null;
-    if (!st || !Array.isArray(st.childrenList)) return Promise.resolve(false);
-    _syncing = true; _lastError = ''; _notify();
+    if (!st || !Array.isArray(st.childrenList)) { _lastError = '本地状态不可用'; _notify(); return Promise.resolve(false); }
+    _pushing = true; _lastError = ''; _notify();
     var fid = _familyId;
     var nowIso = new Date().toISOString();
     var syncSt = _loadLocal();
@@ -337,7 +346,7 @@ var SGASync = (function () {
         _lastError = String((err && err.message) || err);
         return false;
       })
-      .then(function (ok) { _syncing = false; _notify(); return ok; });
+      .then(function (ok) { _pushing = false; _notify(); return ok; });
   }
 
   function schedulePush() {
@@ -488,10 +497,11 @@ var SGASync = (function () {
   }
 
   function pullAndMerge() {
-    if (!_user || !_familyId || _syncing) return Promise.resolve(false);
+    if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
+    if (_pulling) { _lastError = '拉取已在进行中，请稍后'; _notify(); return Promise.resolve(false); }
     var st = (typeof getAppState === 'function') ? getAppState() : null;
-    if (!st) return Promise.resolve(false);
-    _syncing = true; _lastError = ''; _notify();
+    if (!st) { _lastError = '本地状态不可用'; _notify(); return Promise.resolve(false); }
+    _pulling = true; _lastError = ''; _notify();
     var fid = _familyId;
     var changedAny = false;
     var syncSt = _loadLocal();
@@ -656,11 +666,11 @@ var SGASync = (function () {
         _lastError = String((err && err.message) || err);
         return false;
       })
-      .then(function (ok) { _syncing = false; _notify(); return ok; });
+      .then(function (ok) { _pulling = false; _notify(); return ok; });
   }
 
   function syncAll() {
-    if (!_user || !_familyId) return Promise.resolve(false);
+    if (!_user || !_familyId) { _lastError = '未登录或无家庭'; _notify(); return Promise.resolve(false); }
     return pullAndMerge().then(function () {
       /* 拉取失败（_lastError 非空）时不推送，防止本机旧数据覆盖云端 */
       return _lastError ? false : pushNow();
