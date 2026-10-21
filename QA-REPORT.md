@@ -56,3 +56,7 @@ Playwright 脚本导出接收 page 的异步函数；云端脚本使用测试页
 本轮10项Node回归测试通过（包含认证锁、挂起请求、取消、恢复重试），Playwright12项网络挂起和真实退出操作专项检查通过，另验证错误/正确PIN、取消、手机高度适配和意外异常后按钮恢复。独立真实Supabase账号完成初始化、积分记录上传核对和重复同步；这些验证没有登录或检查用户截图中的账号数据。
 
 参考：[Supabase认证回调阻塞说明](https://supabase.com/docs/guides/troubleshooting/why-is-my-supabase-api-call-not-returning-PGzXw0)。
+
+## iPad 登录失败后旧数据仍显示（qa3）
+
+已复现邮箱认证成功但云读取失败时，界面提前显示登录成功、仍保留本地数据。登录/自动确认注册现在等待云初始化，失败保留可见提示并允许重试；Safari Load failed 与密码错误分别显示。13项同步回归和8项iPad尺寸/触屏登录失败-重试场景通过，后者已在Playwright WebKit实际内核重跑通过。使用Windows Playwright WebKit26.5对真实公网测试：公共服务HTTP200，无效测试邮箱登录正常返回Invalid login credentials；这不等价于在用户的实体iPad上测试。新增“检测云连接”，使用公共key和无效测试资料探测，不读取用户输入的邮箱密码，不访问家庭数据。用户实体iPad的具体连接失败原因仍待诊断。

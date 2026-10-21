@@ -137,14 +137,54 @@ var SGASync = (function () {
     _saveLocal(cursor);
   }
 
+  /* Public endpoint probes: never use the entered email/password or a signed-in token. */
+  function checkConnection() {
+    var headers = {
+      apikey: SGA_SUPABASE_ANON_KEY,
+      Authorization: 'Bearer ' + SGA_SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json',
+      'X-Client-Info': 'sga-connectivity-probe'
+    };
+    function probe(label, path, options) {
+      var started = Date.now();
+      return fetchWithTimeout(SGA_SUPABASE_URL + path, Object.assign({ headers: headers }, options || {}))
+        .then(function (response) {
+          return label + '：HTTP ' + response.status + '（接口可达，' + (Date.now() - started) + '毫秒）';
+        }).catch(function (error) {
+          return label + '：连接失败（' + String((error && error.message) || error) + '）';
+        });
+    }
+    return Promise.all([
+      probe('云服务', '/auth/v1/settings'),
+      probe('登录接口', '/auth/v1/token?grant_type=password', {
+        method: 'POST',
+        body: JSON.stringify({ email: 'network-probe@example.invalid', password: 'network-probe-only' })
+      })
+    ]).then(function (lines) {
+      return '版本：20261021qa3\n' + lines.join('\n') +
+        '\n说明：登录接口使用无效的测试资料，HTTP 400 也表示连接正常。请把这段检测结果发给我。';
+    });
+  }
+
+  function waitForCloud(result) {
+    if (!(result && result.data && result.data.session)) return result;
+    return initializeFamily().then(function (ok) {
+      if (!ok) throw new Error('账号已登录，但云端数据尚未加载：' + (_lastError || '请重试同步'));
+      return result;
+    });
+  }
+
   /* ---------- 认证 ---------- */
   function signUp(email, password) {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
-    return client.auth.signUp({ email: email, password: password }).then(authResult);
+    return client.auth.signUp({ email: email, password: password }).then(authResult).then(waitForCloud);
   }
   function signIn(email, password) {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
-    return client.auth.signInWithPassword({ email: email, password: password }).then(authResult);
+    return client.auth.signInWithPassword({ email: email, password: password }).then(authResult).then(function (result) {
+      if (!(result && result.data && result.data.session)) throw new Error('登录未建立会话，请重试');
+      return waitForCloud(result);
+    });
   }
   function signOut() {
     if (!available()) return Promise.reject(new Error('云同步组件未加载'));
@@ -883,6 +923,7 @@ var SGASync = (function () {
   }
 
   return {
+    checkConnection: checkConnection,
     available: available,
     status: status,
     onChange: onChange,
